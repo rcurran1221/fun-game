@@ -1968,7 +1968,7 @@ fn player_combat_mine(
         ),
         With<Player>,
     >,
-    mut rock_q: Query<(Entity, &Transform, &mut Rock)>,
+    mut rock_q: Query<(Entity, &Transform, &mut Rock), Without<Player>>,
     enemy_q: Query<(&Transform, &TilePos), (With<Enemy>, Without<Player>)>,
     mut action: ResMut<PlayerAction>,
     mut inventory: ResMut<Inventory>,
