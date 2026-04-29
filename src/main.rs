@@ -21,7 +21,8 @@ const BOUNDS_Z_MAX: f32 = 25.0;
 const CLICK_ENEMY_RADIUS: f32 = 1.4;
 const CLICK_ROCK_RADIUS: f32 = 1.1;
 const MOVER_RADIUS: f32 = 0.30;
-const GAME_TICK: f32 = 0.6; // seconds per tile step, like OSRS
+const GAME_TICK: f32 = 0.3; // seconds per tile step (half-tick for fluid feel)
+const INVENTORY_CAP: u32 = 28; // OSRS inventory size
 
 // ── Ore type ──────────────────────────────────────────────────
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -240,6 +241,18 @@ struct GameTick {
     ticked: bool,
 }
 
+// Rock shake when mined
+#[derive(Component)]
+struct RockShake {
+    timer: f32, // counts down from shake_duration
+    origin: Vec3,
+}
+
+// Enemy dying animation
+#[derive(Component)]
+struct EnemyDying {
+    timer: f32, // counts down to 0
+}
 // Floating damage / XP splat (world-projected UI node)
 #[derive(Component)]
 struct FloatingSplat {
@@ -416,10 +429,18 @@ fn main() {
                 apply_damage,
                 check_deaths,
                 extraction_update,
+            )
+                .chain(),
+        )
+        .add_systems(
+            Update,
+            (
                 animate_characters,
                 update_enemy_hp_bars,
                 camera_follow,
                 rock_respawn,
+                rock_shake_update,
+                enemy_death_update,
                 damage_flash_update,
                 update_hud,
                 update_chat_log,
@@ -1638,38 +1659,6 @@ fn spawn_hud(commands: &mut Commands) {
                 TextColor(Color::srgba(1.0, 1.0, 1.0, 0.70)),
             ));
         });
-
-    // ── Action state banner (top-center) ─────────────────────
-    commands
-        .spawn((
-            Node {
-                position_type: PositionType::Absolute,
-                top: Val::Px(12.0),
-                left: Val::Percent(50.0),
-                padding: UiRect::axes(Val::Px(22.0), Val::Px(8.0)),
-                align_items: AlignItems::Center,
-                justify_content: JustifyContent::Center,
-                border: UiRect::all(Val::Px(2.0)),
-                ..default()
-            },
-            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.0)),
-            BorderColor(Color::srgba(0.0, 0.0, 0.0, 0.0)),
-            Visibility::Hidden,
-            ZIndex(4),
-            ActionStatePanel,
-            GameEntity,
-        ))
-        .with_children(|p| {
-            p.spawn((
-                Text::new(""),
-                TextFont {
-                    font_size: 22.0,
-                    ..default()
-                },
-                TextColor(Color::WHITE),
-                ActionStateLabel,
-            ));
-        });
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -1684,6 +1673,7 @@ fn handle_click(
     rock_q: Query<(Entity, &Transform, &Rock)>,
     mut click_target: ResMut<PlayerTarget>,
     mut action: ResMut<PlayerAction>,
+    mut chat_log: ResMut<ChatLog>,
 ) {
     if *phase != GamePhase::Playing {
         return;
@@ -1731,23 +1721,24 @@ fn handle_click(
         return;
     }
 
-    // Check rocks
-    let mut nearest_rock: Option<(Entity, f32)> = None;
+    // Check rocks — give feedback even if depleted
+    let mut nearest_rock: Option<(Entity, f32, bool)> = None; // (entity, dist, depleted)
     for (entity, rtf, rock) in &rock_q {
-        if rock.depleted {
-            continue;
-        }
         let d = flat_diff(world_pos, rtf.translation).length();
         if d < CLICK_ROCK_RADIUS {
-            if nearest_rock.map_or(true, |(_, bd)| d < bd) {
-                nearest_rock = Some((entity, d));
+            if nearest_rock.map_or(true, |(_, bd, _)| d < bd) {
+                nearest_rock = Some((entity, d, rock.depleted));
             }
         }
     }
-    if let Some((entity, _)) = nearest_rock {
-        *click_target = PlayerTarget::Mine(entity);
-        if matches!(*action, PlayerAction::Mining { .. }) {
-            *action = PlayerAction::Free;
+    if let Some((entity, _, depleted)) = nearest_rock {
+        if depleted {
+            chat_log.push("That rock is empty.", ChatColor::Game);
+        } else {
+            *click_target = PlayerTarget::Mine(entity);
+            if matches!(*action, PlayerAction::Mining { .. }) {
+                *action = PlayerAction::Free;
+            }
         }
         return;
     }
@@ -1797,6 +1788,8 @@ fn player_walk(
     mut action: ResMut<PlayerAction>,
     enemy_q: Query<(&Transform, &TilePos), (With<Enemy>, Without<Player>)>,
     rock_q: Query<(Entity, &Transform, &Rock), Without<Player>>,
+    inventory: Res<Inventory>,
+    mut chat_log: ResMut<ChatLog>,
 ) {
     if *phase != GamePhase::Playing {
         return;
@@ -1916,15 +1909,21 @@ fn player_walk(
                     }
                     let rock_tile = world_to_tile(rtf.translation);
                     if tile_chebyshev(cur, rock_tile) <= 1 {
-                        // Adjacent — start mining
-                        *action = PlayerAction::Mining {
-                            target: entity,
-                            progress: 0.0,
-                            total: rock.ore.mine_time(),
-                            ore: rock.ore,
-                        };
-                        *anim = AnimState::Mining;
-                        *click_target = PlayerTarget::None;
+                        // Adjacent — start mining (check inventory first)
+                        if inventory.total() >= INVENTORY_CAP {
+                            chat_log.push("Your inventory is full!", ChatColor::Damage);
+                            *click_target = PlayerTarget::None;
+                            *anim = AnimState::Idle;
+                        } else {
+                            *action = PlayerAction::Mining {
+                                target: entity,
+                                progress: 0.0,
+                                total: rock.ore.mine_time(),
+                                ore: rock.ore,
+                            };
+                            *anim = AnimState::Mining;
+                            *click_target = PlayerTarget::None;
+                        }
                     } else {
                         let step = step_toward_tile(cur, rock_tile);
                         let step_clamped = IVec2::new(
@@ -1961,7 +1960,7 @@ fn player_combat_mine(
     phase: Res<GamePhase>,
     mut player_q: Query<
         (
-            &Transform,
+            &mut Transform,
             &TilePos,
             &mut AnimState,
             &mut AttackCooldown,
@@ -1970,7 +1969,7 @@ fn player_combat_mine(
         With<Player>,
     >,
     mut rock_q: Query<(Entity, &Transform, &mut Rock)>,
-    enemy_q: Query<(Entity, &Transform, &TilePos), (With<Enemy>, Without<Player>)>,
+    enemy_q: Query<(&Transform, &TilePos), (With<Enemy>, Without<Player>)>,
     mut action: ResMut<PlayerAction>,
     mut inventory: ResMut<Inventory>,
     mut stats: ResMut<PlayerStats>,
@@ -1978,11 +1977,14 @@ fn player_combat_mine(
     mut chat_log: ResMut<ChatLog>,
     click_target: Res<PlayerTarget>,
     mut mat_assets: ResMut<Assets<StandardMaterial>>,
+    gt: Res<GameTick>,
+    mut commands: Commands,
 ) {
     if *phase != GamePhase::Playing {
         return;
     }
-    let Ok((_player_tf, player_tp, mut anim, mut cd, mut swing)) = player_q.get_single_mut() else {
+    let Ok((mut player_tf, player_tp, mut anim, mut cd, mut swing)) = player_q.get_single_mut()
+    else {
         return;
     };
     let dt = time.delta_secs();
@@ -1993,8 +1995,13 @@ fn player_combat_mine(
     // ── Targeted attack: only swing at the clicked enemy ──
     if cd.0 <= 0.0 {
         if let PlayerTarget::Attack(target_e) = *click_target {
-            if let Ok((_, _, etp)) = enemy_q.get(target_e) {
+            if let Ok((etf, etp)) = enemy_q.get(target_e) {
                 if tile_chebyshev(player_tp.current, etp.current) <= 1 {
+                    // Face the enemy before swinging
+                    let dir = flat_diff(player_tf.translation, etf.translation);
+                    if dir.length() > 0.01 {
+                        face(&mut player_tf, dir.normalize());
+                    }
                     damage_events.send(DamageEvent {
                         target: target_e,
                         amount: PLAYER_DMG,
@@ -2018,31 +2025,55 @@ fn player_combat_mine(
             ore,
         } => {
             let new_p = progress + dt;
+            // Shake rock on each game tick while mining
+            if gt.ticked {
+                if let Ok((rock_e, rtf, _)) = rock_q.get(target) {
+                    commands.entity(rock_e).insert(RockShake {
+                        timer: 0.12,
+                        origin: rtf.translation,
+                    });
+                }
+            }
             if new_p >= total {
-                if let Ok((_, _, mut rock)) = rock_q.get_mut(target) {
-                    rock.depleted = true;
-                    rock.respawn_timer = ore.respawn_time();
-                    if let Some(mat) = mat_assets.get_mut(&rock.full_mat) {
-                        mat.base_color = Color::srgb(0.24, 0.22, 0.20);
+                if inventory.total() >= INVENTORY_CAP {
+                    // Inventory full — cancel mining
+                    chat_log.push("Your inventory is full!", ChatColor::Damage);
+                    *anim = AnimState::Idle;
+                    PlayerAction::Free
+                } else {
+                    // Deplete rock + shake
+                    if let Ok((_, _, mut rock)) = rock_q.get_mut(target) {
+                        rock.depleted = true;
+                        rock.respawn_timer = ore.respawn_time();
+                        if let Some(mat) = mat_assets.get_mut(&rock.full_mat) {
+                            mat.base_color = Color::srgb(0.24, 0.22, 0.20);
+                        }
                     }
-                }
-                let old_level = stats.level();
-                inventory.add(ore);
-                stats.mining_xp += ore.xp();
-                let new_level = stats.level();
-                chat_log.push(
-                    format!("You mine some {} ore.", ore.name()),
-                    ChatColor::Game,
-                );
-                chat_log.push(format!("You gain {} Mining XP.", ore.xp()), ChatColor::Xp);
-                if new_level > old_level {
+                    // Spawn shake after mutable borrow released
+                    if let Ok((rock_e, rtf, _)) = rock_q.get(target) {
+                        commands.entity(rock_e).insert(RockShake {
+                            timer: 0.18,
+                            origin: rtf.translation,
+                        });
+                    }
+                    let old_level = stats.level();
+                    inventory.add(ore);
+                    stats.mining_xp += ore.xp();
+                    let new_level = stats.level();
                     chat_log.push(
-                        format!("Congratulations! Your Mining level is now {}!", new_level),
-                        ChatColor::LevelUp,
+                        format!("You mine some {} ore.", ore.name()),
+                        ChatColor::Game,
                     );
+                    chat_log.push(format!("You gain {} Mining XP.", ore.xp()), ChatColor::Xp);
+                    if new_level > old_level {
+                        chat_log.push(
+                            format!("Congratulations! Your Mining level is now {}!", new_level),
+                            ChatColor::LevelUp,
+                        );
+                    }
+                    *anim = AnimState::Idle;
+                    PlayerAction::Free
                 }
-                *anim = AnimState::Idle;
-                PlayerAction::Free
             } else {
                 *anim = AnimState::Mining;
                 PlayerAction::Mining {
@@ -2448,7 +2479,7 @@ fn check_deaths(
     mut commands: Commands,
     mut phase: ResMut<GamePhase>,
     player_q: Query<(Entity, &Health), With<Player>>,
-    mut enemy_q: Query<(Entity, &Health, &mut Enemy, &mut AnimState)>,
+    mut enemy_q: Query<(Entity, &Health, &mut Enemy, &mut AnimState), Without<EnemyDying>>,
 ) {
     // Player death
     if let Ok((_, hp)) = player_q.get_single() {
@@ -2456,12 +2487,12 @@ fn check_deaths(
             *phase = GamePhase::Dead;
         }
     }
-    // Enemy deaths
+    // Enemy deaths — start death animation instead of instant despawn
     for (entity, hp, mut enemy, mut anim) in &mut enemy_q {
         if hp.cur <= 0.0 && !matches!(enemy.ai, EnemyAi::Dead) {
             enemy.ai = EnemyAi::Dead;
             *anim = AnimState::Idle;
-            commands.entity(entity).despawn_recursive();
+            commands.entity(entity).insert(EnemyDying { timer: 0.35 });
         }
     }
 }
@@ -2516,7 +2547,59 @@ fn extraction_update(
                 other
             }
         }
-    };
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+//  rock_shake_update
+// ─────────────────────────────────────────────────────────────
+fn rock_shake_update(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut shake_q: Query<(Entity, &mut Transform, &mut RockShake)>,
+) {
+    let dt = time.delta_secs();
+    for (entity, mut tf, mut shake) in &mut shake_q {
+        shake.timer -= dt;
+        if shake.timer <= 0.0 {
+            // Snap back to origin and remove component
+            tf.translation = shake.origin;
+            commands.entity(entity).remove::<RockShake>();
+        } else {
+            // Jitter position around origin
+            let t = shake.timer * 60.0;
+            tf.translation = shake.origin
+                + Vec3::new(
+                    t.sin() * 0.06,
+                    (t * 1.7).sin() * 0.04,
+                    (t * 1.3).cos() * 0.06,
+                );
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+//  enemy_death_update  (scale-down + despawn)
+// ─────────────────────────────────────────────────────────────
+fn enemy_death_update(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut dying_q: Query<(Entity, &mut Transform, &mut EnemyDying)>,
+) {
+    let dt = time.delta_secs();
+    const DEATH_DUR: f32 = 0.35;
+    for (entity, mut tf, mut dying) in &mut dying_q {
+        dying.timer -= dt;
+        if dying.timer <= 0.0 {
+            commands.entity(entity).despawn_recursive();
+        } else {
+            let progress = 1.0 - (dying.timer / DEATH_DUR);
+            let s = 1.0 - progress;
+            tf.scale = Vec3::splat(s.max(0.0));
+            // Sink slightly into the ground
+            tf.translation.y = -progress * 0.3;
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -2740,7 +2823,6 @@ fn update_hud(
     player_hp: Query<&Health, With<Player>>,
     player_tf: Query<&Transform, (With<Player>, Without<ExtractionZone>)>,
     zone_q: Query<&Transform, With<ExtractionZone>>,
-    enemy_q: Query<&Transform, (With<Enemy>, Without<Player>)>,
     mut texts: ParamSet<(
         Query<&mut Text, With<HpBarText>>,
         Query<&mut Text, With<OreText>>,
@@ -2748,15 +2830,10 @@ fn update_hud(
         Query<&mut Text, With<MiningBarFill>>,
         Query<&mut Text, With<ExtractBar>>,
         Query<&mut Text, With<GameOverTitle>>,
-        Query<&mut Text, With<ActionStateLabel>>,
     )>,
     mut hp_bar_fill: Query<&mut Node, (With<HpBarFill>, Without<ExtractBarFill>)>,
     mut extract_fill: Query<&mut Node, With<ExtractBarFill>>,
     mut overlay: Query<&mut Visibility, With<GameOverlay>>,
-    mut state_panel: Query<
-        (&mut Visibility, &mut BackgroundColor),
-        (With<ActionStatePanel>, Without<GameOverlay>),
-    >,
 ) {
     // HP
     if let Ok(hp) = player_hp.get_single() {
@@ -2771,7 +2848,18 @@ fn update_hud(
 
     // Ore
     for mut t in texts.p1().iter_mut() {
-        **t = format!("Ore: {}  ({} gp)", inventory.total(), inventory.value());
+        let cap_str = if inventory.total() >= INVENTORY_CAP {
+            " [FULL]".to_string()
+        } else {
+            String::new()
+        };
+        **t = format!(
+            "Ore: {}/{}  ({} gp){}",
+            inventory.total(),
+            INVENTORY_CAP,
+            inventory.value(),
+            cap_str
+        );
     }
 
     // Mining level / status
@@ -2821,60 +2909,6 @@ fn update_hud(
         }
     }
 
-    // ── Action state banner ───────────────────────────────────
-    // Determine state: Extracting > Combat > Mining > Idle
-    let in_combat = if let Ok(ptf) = player_tf.get_single() {
-        enemy_q
-            .iter()
-            .any(|etf| flat_diff(ptf.translation, etf.translation).length() < ATTACK_RANGE * 2.0)
-    } else {
-        false
-    };
-
-    enum StateKind {
-        Idle,
-        Mining,
-        Combat,
-        Extracting,
-    }
-    let state = match &*action {
-        PlayerAction::Extracting { .. } => StateKind::Extracting,
-        PlayerAction::Mining { .. } => StateKind::Mining,
-        _ if in_combat => StateKind::Combat,
-        _ => StateKind::Idle,
-    };
-
-    let (label, bg_color, text_color) = match state {
-        StateKind::Idle => ("", Color::srgba(0.0, 0.0, 0.0, 0.0), Color::WHITE),
-        StateKind::Mining => (
-            "  MINING  ",
-            Color::srgba(0.55, 0.38, 0.05, 0.88),
-            Color::srgb(1.0, 0.88, 0.3),
-        ),
-        StateKind::Combat => (
-            "  IN COMBAT  ",
-            Color::srgba(0.55, 0.05, 0.05, 0.88),
-            Color::srgb(1.0, 0.35, 0.35),
-        ),
-        StateKind::Extracting => (
-            "  EXTRACTING  ",
-            Color::srgba(0.05, 0.42, 0.12, 0.88),
-            Color::srgb(0.4, 1.0, 0.55),
-        ),
-    };
-
-    for (mut vis, mut bg) in &mut state_panel {
-        *vis = if label.is_empty() {
-            Visibility::Hidden
-        } else {
-            Visibility::Visible
-        };
-        *bg = BackgroundColor(bg_color);
-    }
-    for mut t in texts.p6().iter_mut() {
-        **t = label.into();
-    }
-
     // Game over overlay
     let show_overlay = *phase != GamePhase::Playing;
     for mut vis in &mut overlay {
@@ -2895,8 +2929,6 @@ fn update_hud(
             GamePhase::Playing => String::new(),
         };
     }
-    // suppress unused variable warning for text_color (used in future styling)
-    let _ = text_color;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -3225,9 +3257,9 @@ fn camera_follow(
         return;
     };
     let target = ptf.translation + CAM_OFFSET;
-    let pos = ctf
-        .translation
-        .lerp(target, (time.delta_secs() * 7.0).min(1.0));
+    // Smooth exponential follow: fast enough to feel responsive, slow enough to be smooth
+    let t = 1.0 - (-time.delta_secs() * 12.0_f32).exp();
+    let pos = ctf.translation.lerp(target, t);
     let look = Vec3::new(ptf.translation.x, 0.0, ptf.translation.z - 1.0);
     *ctf = Transform::from_translation(pos).looking_at(look, Vec3::Y);
 }
