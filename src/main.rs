@@ -221,6 +221,53 @@ struct ActionStateLabel;
 #[derive(Component)]
 struct TargetIndicator;
 
+// Floating damage / XP splat (world-projected UI node)
+#[derive(Component)]
+struct FloatingSplat {
+    world_pos: Vec3,
+    timer: f32,
+    max_time: f32,
+    base_color: Color,
+}
+
+// Chat box line index (0 = newest / bottom, N-1 = oldest / top)
+#[derive(Component)]
+struct ChatLine(usize);
+
+// ── Chat log ──────────────────────────────────────────────────
+#[derive(Clone, Copy)]
+enum ChatColor {
+    Game,    // cyan  – standard game messages
+    Damage,  // red   – combat damage
+    Xp,      // green – XP gain
+    LevelUp, // gold  – level up
+}
+impl ChatColor {
+    fn color(self) -> Color {
+        match self {
+            Self::Game => Color::srgb(0.0, 0.85, 0.85),
+            Self::Damage => Color::srgb(1.0, 0.32, 0.32),
+            Self::Xp => Color::srgb(0.45, 1.0, 0.45),
+            Self::LevelUp => Color::srgb(1.0, 0.85, 0.0),
+        }
+    }
+}
+
+const CHAT_LINES: usize = 7;
+
+#[derive(Resource, Default)]
+struct ChatLog {
+    messages: Vec<(String, Color)>,
+}
+impl ChatLog {
+    fn push(&mut self, msg: impl Into<String>, kind: ChatColor) {
+        self.messages.push((msg.into(), kind.color()));
+        if self.messages.len() > CHAT_LINES {
+            self.messages.remove(0);
+        }
+    }
+}
+
 // ── Resources ─────────────────────────────────────────────────
 #[derive(Resource, Default)]
 struct Inventory {
@@ -323,7 +370,7 @@ fn main() {
             }),
             ..default()
         }))
-        .insert_resource(ClearColor(Color::srgb(0.14, 0.18, 0.12)))
+        .insert_resource(ClearColor(Color::srgb(0.06, 0.05, 0.04)))
         .insert_resource(GamePhase::Playing)
         .insert_resource(PlayerAction::Free)
         .insert_resource(Inventory::default())
@@ -331,6 +378,7 @@ fn main() {
         .insert_resource(ShouldReset::default())
         .insert_resource(PlayerTarget::default())
         .insert_resource(ClickIndicators::default())
+        .insert_resource(ChatLog::default())
         .add_event::<DamageEvent>()
         .add_systems(Startup, setup)
         .add_systems(
@@ -352,6 +400,8 @@ fn main() {
                 rock_respawn,
                 damage_flash_update,
                 update_hud,
+                update_chat_log,
+                update_splats,
                 handle_game_over_input,
             )
                 .chain(),
@@ -681,14 +731,25 @@ fn spawn_world(
     });
 
     let rocks: &[(OreType, f32, f32)] = &[
+        // West cluster
         (OreType::Copper, -11.0, -1.0),
+        (OreType::Copper, -13.0, -4.0),
+        (OreType::Iron, -12.0, -8.0),
+        // Central path
         (OreType::Copper, -7.0, 7.0),
         (OreType::Tin, 5.0, -3.0),
+        (OreType::Tin, -5.0, -6.0),
+        // East cluster
         (OreType::Iron, 10.0, -9.0),
+        (OreType::Iron, 13.0, -5.0),
+        // South coal belt
         (OreType::Coal, 0.5, -15.0),
+        (OreType::Coal, 5.0, -20.0),
         (OreType::Coal, -9.0, -18.0),
+        // North rocks
         (OreType::Iron, 8.0, 12.0),
         (OreType::Copper, -14.0, 10.0),
+        // Deep south rare ores
         (OreType::Adamantite, -21.0, -24.0),
         (OreType::Rune, 20.0, -27.0),
     ];
@@ -914,28 +975,29 @@ fn spawn_enemies(
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
 ) {
+    // OSRS-style goblin: green skin, brown leather armor
     let skin = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.88, 0.72, 0.55),
-        perceptual_roughness: 0.80,
+        base_color: Color::srgb(0.28, 0.48, 0.16),
+        perceptual_roughness: 0.82,
         ..default()
     });
     let shirt = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.22, 0.30, 0.16),
+        base_color: Color::srgb(0.35, 0.24, 0.10),
         perceptual_roughness: 0.88,
         ..default()
     });
     let pants = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.28, 0.22, 0.12),
+        base_color: Color::srgb(0.28, 0.20, 0.10),
         perceptual_roughness: 0.90,
         ..default()
     });
     let boot = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.14, 0.10, 0.06),
+        base_color: Color::srgb(0.18, 0.12, 0.06),
         perceptual_roughness: 0.90,
         ..default()
     });
     let hair = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.12, 0.10, 0.08),
+        base_color: Color::srgb(0.10, 0.08, 0.04),
         perceptual_roughness: 0.90,
         ..default()
     });
@@ -1219,6 +1281,13 @@ fn build_humanoid(
 //  HUD
 // ─────────────────────────────────────────────────────────────
 fn spawn_hud(commands: &mut Commands) {
+    // OSRS colour palette
+    let panel_bg = Color::srgba(0.18, 0.13, 0.05, 0.95);
+    let panel_gold = Color::srgb(1.00, 0.82, 0.22);
+    let panel_text = Color::srgb(1.00, 1.00, 1.00);
+    let bar_dark = Color::srgb(0.28, 0.06, 0.06);
+    let bar_green = Color::srgb(0.10, 0.80, 0.15);
+
     // Damage flash overlay
     commands.spawn((
         Node {
@@ -1233,7 +1302,7 @@ fn spawn_hud(commands: &mut Commands) {
         GameEntity,
     ));
 
-    // Top-left HUD panel
+    // ── Top-left stats panel ──────────────────────────────────
     commands
         .spawn((
             Node {
@@ -1241,32 +1310,43 @@ fn spawn_hud(commands: &mut Commands) {
                 top: Val::Px(10.0),
                 left: Val::Px(10.0),
                 flex_direction: FlexDirection::Column,
-                row_gap: Val::Px(5.0),
+                row_gap: Val::Px(6.0),
                 padding: UiRect::all(Val::Px(10.0)),
-                min_width: Val::Px(220.0),
+                min_width: Val::Px(230.0),
+                border: UiRect::all(Val::Px(2.0)),
                 ..default()
             },
-            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.55)),
+            BackgroundColor(panel_bg),
+            BorderColor(Color::srgb(0.45, 0.34, 0.12)),
             GameEntity,
         ))
         .with_children(|p| {
-            // HP label + bar
+            // Title
             p.spawn((
-                Text::new("HP  100 / 100"),
+                Text::new("── Extraction Mining ──"),
                 TextFont {
-                    font_size: 15.0,
+                    font_size: 13.0,
                     ..default()
                 },
-                TextColor(Color::WHITE),
+                TextColor(panel_gold),
+            ));
+            // HP
+            p.spawn((
+                Text::new("Hitpoints: 100 / 100"),
+                TextFont {
+                    font_size: 14.0,
+                    ..default()
+                },
+                TextColor(panel_text),
                 HpBarText,
             ));
             p.spawn((
                 Node {
-                    width: Val::Px(200.0),
-                    height: Val::Px(14.0),
+                    width: Val::Px(210.0),
+                    height: Val::Px(12.0),
                     ..default()
                 },
-                BackgroundColor(Color::srgb(0.25, 0.04, 0.04)),
+                BackgroundColor(bar_dark),
             ))
             .with_children(|bar| {
                 bar.spawn((
@@ -1275,76 +1355,87 @@ fn spawn_hud(commands: &mut Commands) {
                         height: Val::Percent(100.0),
                         ..default()
                     },
-                    BackgroundColor(Color::srgb(0.85, 0.12, 0.12)),
+                    BackgroundColor(bar_green),
                     HpBarFill,
                 ));
             });
-
-            // Ore + value
+            // Inventory
             p.spawn((
                 Text::new("Ore: 0  (0 gp)"),
                 TextFont {
-                    font_size: 15.0,
+                    font_size: 14.0,
                     ..default()
                 },
-                TextColor(Color::srgb(0.90, 0.80, 0.30)),
+                TextColor(panel_gold),
                 OreText,
             ));
-
-            // Mining level
+            // Skill level
             p.spawn((
                 Text::new("Mining Lv: 1"),
                 TextFont {
                     font_size: 13.0,
                     ..default()
                 },
-                TextColor(Color::srgb(0.65, 0.88, 0.45)),
+                TextColor(Color::srgb(0.65, 0.90, 0.45)),
                 StatusText,
             ));
         });
 
-    // Controls hint (bottom-right)
+    // ── OSRS-style chat box (bottom-left) ─────────────────────
     commands
         .spawn((
             Node {
                 position_type: PositionType::Absolute,
                 bottom: Val::Px(10.0),
-                right: Val::Px(10.0),
+                left: Val::Px(10.0),
+                width: Val::Px(510.0),
                 flex_direction: FlexDirection::Column,
-                row_gap: Val::Px(3.0),
-                padding: UiRect::all(Val::Px(10.0)),
+                padding: UiRect {
+                    left: Val::Px(8.0),
+                    right: Val::Px(8.0),
+                    top: Val::Px(6.0),
+                    bottom: Val::Px(6.0),
+                },
+                row_gap: Val::Px(1.0),
+                border: UiRect::all(Val::Px(2.0)),
                 ..default()
             },
-            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.50)),
+            BackgroundColor(Color::srgba(0.10, 0.07, 0.02, 0.92)),
+            BorderColor(Color::srgb(0.42, 0.32, 0.10)),
             GameEntity,
         ))
         .with_children(|p| {
-            for (key, desc) in &[
-                ("LMB (ground)", "Move"),
-                ("LMB (enemy)", "Chase & attack"),
-                ("LMB (rock)", "Walk & mine"),
-                ("Walk into zone", "Extract & escape"),
-                ("ESC", "Quit"),
-            ] {
+            p.spawn((
+                Text::new("Chat"),
+                TextFont {
+                    font_size: 11.0,
+                    ..default()
+                },
+                TextColor(Color::srgb(0.75, 0.60, 0.18)),
+            ));
+            // Lines: oldest (index CHAT_LINES-1) at top, newest (0) at bottom
+            for i in (0..CHAT_LINES).rev() {
                 p.spawn((
-                    Text::new(format!("{:>18}  {}", key, desc)),
+                    Text::new(""),
                     TextFont {
                         font_size: 13.0,
                         ..default()
                     },
-                    TextColor(Color::srgba(0.85, 0.85, 0.85, 0.80)),
+                    TextColor(Color::srgb(0.0, 0.85, 0.85)),
+                    ChatLine(i),
+                    GameEntity,
                 ));
             }
         });
 
-    // Mining progress bar (bottom-left, shared with extract timer)
+    // ── Mining / extraction progress bar (above chat box) ─────
     commands
         .spawn((
             Node {
                 position_type: PositionType::Absolute,
-                bottom: Val::Px(38.0),
+                bottom: Val::Px(178.0),
                 left: Val::Px(10.0),
-                width: Val::Px(500.0),
+                width: Val::Px(510.0),
                 flex_direction: FlexDirection::Column,
                 row_gap: Val::Px(4.0),
                 ..default()
@@ -1355,19 +1446,19 @@ fn spawn_hud(commands: &mut Commands) {
             p.spawn((
                 Text::new(""),
                 TextFont {
-                    font_size: 15.0,
+                    font_size: 14.0,
                     ..default()
                 },
-                TextColor(Color::srgba(1.0, 1.0, 1.0, 0.9)),
-                MiningBarFill, // reuse as label
+                TextColor(panel_gold),
+                MiningBarFill,
             ));
             p.spawn((
                 Node {
-                    width: Val::Px(500.0),
-                    height: Val::Px(16.0),
+                    width: Val::Px(510.0),
+                    height: Val::Px(14.0),
                     ..default()
                 },
-                BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.55)),
+                BackgroundColor(Color::srgba(0.12, 0.09, 0.04, 0.88)),
             ))
             .with_children(|bar| {
                 bar.spawn((
@@ -1382,7 +1473,52 @@ fn spawn_hud(commands: &mut Commands) {
             });
         });
 
-    // Extraction zone hint (top-right)
+    // ── Controls hint (bottom-right) ─────────────────────────
+    commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                bottom: Val::Px(10.0),
+                right: Val::Px(10.0),
+                flex_direction: FlexDirection::Column,
+                row_gap: Val::Px(3.0),
+                padding: UiRect::all(Val::Px(10.0)),
+                border: UiRect::all(Val::Px(2.0)),
+                ..default()
+            },
+            BackgroundColor(panel_bg),
+            BorderColor(Color::srgb(0.45, 0.34, 0.12)),
+            GameEntity,
+        ))
+        .with_children(|p| {
+            p.spawn((
+                Text::new("── Controls ──"),
+                TextFont {
+                    font_size: 11.0,
+                    ..default()
+                },
+                TextColor(panel_gold),
+            ));
+            for (key, desc) in &[
+                ("LMB ground", "Move"),
+                ("LMB enemy", "Attack"),
+                ("LMB rock", "Mine"),
+                ("Walk to zone", "Extract"),
+                ("R", "Restart"),
+                ("ESC", "Quit"),
+            ] {
+                p.spawn((
+                    Text::new(format!("{:<14}{}", key, desc)),
+                    TextFont {
+                        font_size: 12.0,
+                        ..default()
+                    },
+                    TextColor(Color::srgb(0.82, 0.82, 0.82)),
+                ));
+            }
+        });
+
+    // ── Extraction distance (top-right) ──────────────────────
     commands
         .spawn((
             Node {
@@ -1390,24 +1526,26 @@ fn spawn_hud(commands: &mut Commands) {
                 top: Val::Px(10.0),
                 right: Val::Px(10.0),
                 padding: UiRect::all(Val::Px(8.0)),
+                border: UiRect::all(Val::Px(2.0)),
                 ..default()
             },
-            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.50)),
+            BackgroundColor(panel_bg),
+            BorderColor(Color::srgb(0.45, 0.34, 0.12)),
             GameEntity,
         ))
         .with_children(|p| {
             p.spawn((
                 Text::new("EXTRACT: --"),
                 TextFont {
-                    font_size: 15.0,
+                    font_size: 14.0,
                     ..default()
                 },
-                TextColor(Color::srgb(0.25, 0.90, 0.35)),
+                TextColor(Color::srgb(0.25, 0.92, 0.38)),
                 ExtractBar,
             ));
         });
 
-    // Game over / win overlay (hidden initially)
+    // ── Game over / win overlay ───────────────────────────────
     commands
         .spawn((
             Node {
@@ -1420,7 +1558,7 @@ fn spawn_hud(commands: &mut Commands) {
                 row_gap: Val::Px(18.0),
                 ..default()
             },
-            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.80)),
+            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.82)),
             Visibility::Hidden,
             ZIndex(10),
             GameOverlay,
@@ -1430,19 +1568,19 @@ fn spawn_hud(commands: &mut Commands) {
             p.spawn((
                 Text::new(""),
                 TextFont {
-                    font_size: 44.0,
+                    font_size: 46.0,
                     ..default()
                 },
-                TextColor(Color::WHITE),
+                TextColor(panel_gold),
                 GameOverTitle,
             ));
             p.spawn((
                 Text::new("Press R to restart  |  ESC to quit"),
                 TextFont {
-                    font_size: 20.0,
+                    font_size: 18.0,
                     ..default()
                 },
-                TextColor(Color::srgba(1.0, 1.0, 1.0, 0.65)),
+                TextColor(Color::srgba(1.0, 1.0, 1.0, 0.70)),
             ));
         });
 
@@ -1456,9 +1594,11 @@ fn spawn_hud(commands: &mut Commands) {
                 padding: UiRect::axes(Val::Px(22.0), Val::Px(8.0)),
                 align_items: AlignItems::Center,
                 justify_content: JustifyContent::Center,
+                border: UiRect::all(Val::Px(2.0)),
                 ..default()
             },
             BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.0)),
+            BorderColor(Color::srgba(0.0, 0.0, 0.0, 0.0)),
             Visibility::Hidden,
             ZIndex(4),
             ActionStatePanel,
@@ -1720,6 +1860,7 @@ fn player_combat_mine(
     mut inventory: ResMut<Inventory>,
     mut stats: ResMut<PlayerStats>,
     mut damage_events: EventWriter<DamageEvent>,
+    mut chat_log: ResMut<ChatLog>,
 ) {
     if *phase != GamePhase::Playing {
         return;
@@ -1770,8 +1911,21 @@ fn player_combat_mine(
                     rock.respawn_timer = ore.respawn_time();
                     mat.0 = rock.depl_mat.clone();
                 }
+                let old_level = stats.level();
                 inventory.add(ore);
                 stats.mining_xp += ore.xp();
+                let new_level = stats.level();
+                chat_log.push(
+                    format!("You mine some {} ore.", ore.name()),
+                    ChatColor::Game,
+                );
+                chat_log.push(format!("You gain {} Mining XP.", ore.xp()), ChatColor::Xp);
+                if new_level > old_level {
+                    chat_log.push(
+                        format!("Congratulations! Your Mining level is now {}!", new_level),
+                        ChatColor::LevelUp,
+                    );
+                }
                 *anim = AnimState::Idle;
                 PlayerAction::Free
             } else {
@@ -2074,25 +2228,67 @@ fn ai_update(
 //  apply_damage
 // ─────────────────────────────────────────────────────────────
 fn apply_damage(
+    mut commands: Commands,
     mut events: EventReader<DamageEvent>,
     mut health_q: Query<&mut Health>,
+    transform_q: Query<&Transform>,
     mut flash_q: Query<&mut BackgroundColor, With<DamageFlash>>,
     player_q: Query<Entity, With<Player>>,
     mut action: ResMut<PlayerAction>,
+    mut chat_log: ResMut<ChatLog>,
 ) {
     for ev in events.read() {
         if let Ok(mut hp) = health_q.get_mut(ev.target) {
             hp.cur = (hp.cur - ev.amount).max(0.0);
         }
-        // Flash screen red if player was hit
-        if player_q.get(ev.target).is_ok() {
+        let is_player_target = player_q.get(ev.target).is_ok();
+
+        // Spawn floating damage splat
+        let world_pos = transform_q
+            .get(ev.target)
+            .map(|tf| tf.translation + Vec3::new(0.0, 1.8, 0.0))
+            .unwrap_or(Vec3::new(0.0, 1.8, 0.0));
+        let splat_color = Color::srgb(1.0, 0.15, 0.15);
+        commands.spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Px(0.0),
+                top: Val::Px(0.0),
+                ..default()
+            },
+            Text::new(format!("{}", ev.amount as i32)),
+            TextFont {
+                font_size: 20.0,
+                ..default()
+            },
+            TextColor(splat_color),
+            ZIndex(20),
+            FloatingSplat {
+                world_pos,
+                timer: 0.0,
+                max_time: 1.2,
+                base_color: splat_color,
+            },
+            GameEntity,
+        ));
+
+        // Chat messages
+        if is_player_target {
             for mut bg in &mut flash_q {
                 bg.0 = Color::srgba(0.8, 0.0, 0.0, 0.45);
             }
-            // Cancel extraction if hit
             if matches!(*action, PlayerAction::Extracting { .. }) {
                 *action = PlayerAction::Free;
             }
+            chat_log.push(
+                format!("You have been hit for {} damage.", ev.amount as i32),
+                ChatColor::Damage,
+            );
+        } else {
+            chat_log.push(
+                format!("You hit for {} damage.", ev.amount as i32),
+                ChatColor::Game,
+            );
         }
     }
 }
@@ -2585,6 +2781,7 @@ fn reset_game(
     mut action: ResMut<PlayerAction>,
     mut click_target: ResMut<PlayerTarget>,
     mut click_indicators: ResMut<ClickIndicators>,
+    mut chat_log: ResMut<ChatLog>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
@@ -2600,9 +2797,8 @@ fn reset_game(
     *stats = PlayerStats::default();
     *action = PlayerAction::Free;
     *click_target = PlayerTarget::None;
-    // Indicator entities are tagged GameEntity so they're already despawned above;
-    // just clear the stored handles so update_indicators doesn't reference stale IDs.
     *click_indicators = ClickIndicators::default();
+    *chat_log = ChatLog::default();
 
     // Re-run setup inline (same as setup but without Startup)
     commands.insert_resource(AmbientLight {
@@ -2786,6 +2982,60 @@ fn resolve_collisions(
                 tf.translation += corrections[i];
                 clamp_pos(&mut tf);
             }
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+//  update_splats  (floating damage / XP numbers)
+// ─────────────────────────────────────────────────────────────
+fn update_splats(
+    mut commands: Commands,
+    time: Res<Time>,
+    camera_q: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
+    mut splat_q: Query<(Entity, &mut FloatingSplat, &mut Node, &mut TextColor)>,
+) {
+    let Ok((camera, cam_gtf)) = camera_q.get_single() else {
+        return;
+    };
+    let dt = time.delta_secs();
+
+    for (entity, mut splat, mut node, mut tc) in &mut splat_q {
+        splat.timer += dt;
+        splat.world_pos.y += 1.6 * dt;
+
+        if splat.timer >= splat.max_time {
+            commands.entity(entity).despawn();
+            continue;
+        }
+
+        // Project to screen
+        if let Ok(screen_pos) = camera.world_to_viewport(cam_gtf, splat.world_pos) {
+            node.left = Val::Px(screen_pos.x - 12.0);
+            node.top = Val::Px(screen_pos.y - 12.0);
+        }
+
+        // Fade out in the last half of lifetime
+        let t = splat.timer / splat.max_time;
+        let alpha = if t < 0.5 { 1.0 } else { 1.0 - (t - 0.5) * 2.0 };
+        let c = splat.base_color.to_srgba();
+        tc.0 = Color::srgba(c.red, c.green, c.blue, alpha);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+//  update_chat_log  (refresh chat box text from ChatLog resource)
+// ─────────────────────────────────────────────────────────────
+fn update_chat_log(log: Res<ChatLog>, mut chat_q: Query<(&ChatLine, &mut Text, &mut TextColor)>) {
+    for (line, mut text, mut color) in &mut chat_q {
+        let n = log.messages.len();
+        // line.0 == 0 → newest (last in vec), line.0 == N-1 → oldest (first in vec)
+        if line.0 < n {
+            let idx = n - 1 - line.0;
+            **text = log.messages[idx].0.clone();
+            color.0 = log.messages[idx].1;
+        } else {
+            **text = String::new();
         }
     }
 }
