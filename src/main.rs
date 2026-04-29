@@ -3,9 +3,9 @@ use bevy::prelude::*;
 // ── Constants ─────────────────────────────────────────────────
 const WINDOW_W: f32 = 1100.0;
 const WINDOW_H: f32 = 760.0;
-const PLAYER_SPEED: f32 = 7.0;
-const ENEMY_SPEED: f32 = 4.2;
-const ENEMY_CHASE: f32 = 5.6;
+const PLAYER_SPEED: f32 = 4.5;
+const ENEMY_SPEED: f32 = 2.8;
+const ENEMY_CHASE: f32 = 3.6;
 const ATTACK_RANGE: f32 = 2.3;
 const INTERACT_DIST: f32 = 2.0;
 const DETECT_RADIUS: f32 = 7.5;
