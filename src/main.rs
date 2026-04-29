@@ -3,28 +3,25 @@ use bevy::prelude::*;
 // ── Constants ─────────────────────────────────────────────────
 const WINDOW_W: f32 = 1100.0;
 const WINDOW_H: f32 = 760.0;
-const TICK_RATE: f32 = 0.6;
-const SWING_DURATION: f32 = 0.55;
-const PLAYER_ATK_TICKS: u32 = 4;
-const ENEMY_ATK_TICKS: u32 = 5;
+const PLAYER_SPEED: f32 = 7.0;
+const ENEMY_SPEED: f32 = 4.2;
+const ENEMY_CHASE: f32 = 5.6;
+const ATTACK_RANGE: f32 = 2.3;
+const INTERACT_DIST: f32 = 2.0;
 const DETECT_RADIUS: f32 = 7.5;
 const LOSE_RADIUS: f32 = 22.0;
 const PLAYER_HP: f32 = 100.0;
 const ENEMY_HP: f32 = 60.0;
 const PLAYER_DMG: f32 = 30.0;
 const ENEMY_DMG: f32 = 14.0;
+const PLAYER_ATK_CD: f32 = 0.70;
+const ENEMY_ATK_CD: f32 = 1.50;
 const EXTRACT_TIME: f32 = 3.5;
 const EXTRACT_RADIUS: f32 = 2.5;
 const CAM_OFFSET: Vec3 = Vec3::new(0.0, 20.0, 16.0);
 const BOUNDS_X: f32 = 21.0;
 const BOUNDS_Z_MIN: f32 = -25.0;
 const BOUNDS_Z_MAX: f32 = 19.0;
-const TILE_SIZE: f32 = 1.0;
-const TILE_BOUNDS_X: i32 = 21;
-const TILE_BOUNDS_Z_MIN: i32 = -25;
-const TILE_BOUNDS_Z_MAX: i32 = 19;
-const CLICK_ENEMY_RADIUS: f32 = 0.9;
-const CLICK_ROCK_RADIUS: f32 = 1.1;
 
 // ── Ore type ──────────────────────────────────────────────────
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -51,11 +48,11 @@ impl OreType {
             Self::Coal => "Coal",
         }
     }
-    fn mine_ticks(self) -> u32 {
+    fn mine_time(self) -> f32 {
         match self {
-            Self::Copper | Self::Tin => 4,
-            Self::Iron => 6,
-            Self::Coal => 9,
+            Self::Copper | Self::Tin => 2.2,
+            Self::Iron => 3.5,
+            Self::Coal => 5.0,
         }
     }
     fn respawn_time(self) -> f32 {
@@ -109,9 +106,9 @@ enum AnimState {
 // ── Enemy AI state ────────────────────────────────────────────
 #[derive(Clone)]
 enum EnemyAi {
-    Patrolling { idx: usize, wait_ticks: u32 },
-    Chasing { lose_ticks: u32 },
-    Attacking,
+    Patrolling { idx: usize, wait: f32 },
+    Chasing { lose_timer: f32 },
+    Attacking { cooldown: f32 },
     Dead,
 }
 
@@ -139,7 +136,7 @@ struct Health {
     max: f32,
 }
 #[derive(Component)]
-struct AttackCooldown(u32);
+struct AttackCooldown(f32);
 #[derive(Component)]
 struct Rock {
     ore: OreType,
@@ -233,8 +230,8 @@ enum PlayerAction {
     Free,
     Mining {
         target: Entity,
-        ticks_done: u32,
-        ticks_needed: u32,
+        progress: f32,
+        total: f32,
         ore: OreType,
     },
     Extracting {
@@ -244,30 +241,6 @@ enum PlayerAction {
 
 #[derive(Resource, Default)]
 struct ShouldReset(bool);
-
-#[derive(Resource, Clone, Default)]
-enum PlayerTarget {
-    #[default]
-    None,
-    Move(IVec2),
-    Attack(Entity),
-    Mine(Entity),
-}
-
-// ── Tile position components ───────────────────────────────────
-#[derive(Component, Clone, Copy, Default)]
-struct TilePos(IVec2);
-
-#[derive(Component, Clone, Copy, Default)]
-struct PrevTilePos(IVec2);
-
-// ── Tick state ────────────────────────────────────────────────
-#[derive(Resource, Default)]
-struct TickState {
-    timer: f32,
-    ticked: bool,
-    count: u64,
-}
 
 // ── Events ────────────────────────────────────────────────────
 #[derive(Event)]
@@ -295,19 +268,15 @@ fn main() {
         .insert_resource(Inventory::default())
         .insert_resource(PlayerStats::default())
         .insert_resource(ShouldReset::default())
-        .insert_resource(PlayerTarget::default())
-        .insert_resource(TickState::default())
         .add_event::<DamageEvent>()
         .add_systems(Startup, setup)
         .add_systems(
             Update,
             (
                 reset_game,
-                tick_advance,
-                handle_click,
-                player_tick,
-                enemy_tick,
-                interpolate_movement,
+                player_movement,
+                player_combat_mine,
+                ai_update,
                 apply_damage,
                 check_deaths,
                 extraction_update,
@@ -745,12 +714,10 @@ fn spawn_player(
                 cur: PLAYER_HP,
                 max: PLAYER_HP,
             },
-            AttackCooldown(0u32),
+            AttackCooldown(0.0),
             AnimState::default(),
             AnimTimer::default(),
             SwingTimer::default(),
-            TilePos(IVec2::new(0, 7)),
-            PrevTilePos(IVec2::new(0, 7)),
             PlayerLimbs {
                 head,
                 torso,
@@ -886,10 +853,7 @@ fn spawn_enemies(
                 Transform::from_xyz(sx, 0.0, sz),
                 Visibility::default(),
                 Enemy {
-                    ai: EnemyAi::Patrolling {
-                        idx: 0,
-                        wait_ticks: 0,
-                    },
+                    ai: EnemyAi::Patrolling { idx: 0, wait: 0.0 },
                     patrol,
                     hp_fill: fill,
                 },
@@ -897,11 +861,9 @@ fn spawn_enemies(
                     cur: ENEMY_HP,
                     max: ENEMY_HP,
                 },
-                AttackCooldown(0u32),
+                AttackCooldown(0.0),
                 AnimState::default(),
                 AnimTimer::default(),
-                TilePos(IVec2::new(sx as i32, sz as i32)),
-                PrevTilePos(IVec2::new(sx as i32, sz as i32)),
                 PlayerLimbs {
                     head,
                     torso,
@@ -1159,9 +1121,9 @@ fn spawn_hud(commands: &mut Commands) {
         ))
         .with_children(|p| {
             for (key, desc) in &[
-                ("LMB (ground)", "Move to tile"),
-                ("LMB (enemy)", "Chase & attack"),
-                ("LMB (rock)", "Walk & mine"),
+                ("WASD / Arrows", "Move"),
+                ("LMB / Space", "Attack enemy"),
+                ("E", "Mine rock (stand close)"),
                 ("Walk into zone", "Extract & escape"),
                 ("ESC", "Quit"),
             ] {
@@ -1287,140 +1249,85 @@ fn spawn_hud(commands: &mut Commands) {
 }
 
 // ─────────────────────────────────────────────────────────────
-//  handle_click  (LMB → set PlayerTarget)
+//  player_movement  (WASD)
 // ─────────────────────────────────────────────────────────────
-fn handle_click(
-    windows: Query<&Window>,
-    camera_q: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
-    mouse: Res<ButtonInput<MouseButton>>,
+fn player_movement(
+    keys: Res<ButtonInput<KeyCode>>,
+    time: Res<Time>,
     phase: Res<GamePhase>,
-    enemy_q: Query<(Entity, &Transform), With<Enemy>>,
-    rock_q: Query<(Entity, &Transform, &Rock)>,
-    mut click_target: ResMut<PlayerTarget>,
+    mut player_q: Query<(&mut Transform, &mut AnimState, &mut SwingTimer), With<Player>>,
     mut action: ResMut<PlayerAction>,
 ) {
     if *phase != GamePhase::Playing {
         return;
     }
-    if !mouse.just_pressed(MouseButton::Left) {
-        return;
-    }
-    let Ok(window) = windows.get_single() else {
+    let Ok((mut tf, mut anim, mut swing)) = player_q.get_single_mut() else {
         return;
     };
-    let Some(cursor_pos) = window.cursor_position() else {
-        return;
-    };
-    let Ok((camera, cam_gtf)) = camera_q.get_single() else {
-        return;
-    };
-    let Ok(ray) = camera.viewport_to_world(cam_gtf, cursor_pos) else {
-        return;
-    };
-    let dir = Vec3::from(ray.direction);
-    if dir.y.abs() < 1e-5 {
-        return;
-    }
-    let t = -ray.origin.y / dir.y;
-    if t <= 0.0 {
-        return;
-    }
-    let world_pos = ray.origin + dir * t;
 
-    // Check enemies first
-    let mut nearest_enemy: Option<(Entity, f32)> = None;
-    for (entity, etf) in &enemy_q {
-        let d = flat_diff(world_pos, etf.translation).length();
-        if d < CLICK_ENEMY_RADIUS {
-            if nearest_enemy.map_or(true, |(_, bd)| d < bd) {
-                nearest_enemy = Some((entity, d));
-            }
-        }
+    // Tick swing timer
+    swing.0 = (swing.0 - time.delta_secs()).max(0.0);
+
+    let mut dir = Vec3::ZERO;
+    if keys.pressed(KeyCode::KeyW) || keys.pressed(KeyCode::ArrowUp) {
+        dir.z -= 1.0;
     }
-    if let Some((entity, _)) = nearest_enemy {
-        *click_target = PlayerTarget::Attack(entity);
+    if keys.pressed(KeyCode::KeyS) || keys.pressed(KeyCode::ArrowDown) {
+        dir.z += 1.0;
+    }
+    if keys.pressed(KeyCode::KeyA) || keys.pressed(KeyCode::ArrowLeft) {
+        dir.x -= 1.0;
+    }
+    if keys.pressed(KeyCode::KeyD) || keys.pressed(KeyCode::ArrowRight) {
+        dir.x += 1.0;
+    }
+
+    if dir.length() > 0.01 {
+        let dir = dir.normalize();
+        tf.translation += dir * PLAYER_SPEED * time.delta_secs();
+        tf.translation.x = tf.translation.x.clamp(-BOUNDS_X, BOUNDS_X);
+        tf.translation.z = tf.translation.z.clamp(BOUNDS_Z_MIN, BOUNDS_Z_MAX);
+        face(&mut tf, dir);
+        // Swing anim takes priority over walk during attack
+        if swing.0 <= 0.0 {
+            *anim = AnimState::Walking;
+        }
+        // Cancel mining if moving
         if matches!(*action, PlayerAction::Mining { .. }) {
             *action = PlayerAction::Free;
         }
-        return;
-    }
-
-    // Check rocks
-    let mut nearest_rock: Option<(Entity, f32)> = None;
-    for (entity, rtf, rock) in &rock_q {
-        if rock.depleted {
-            continue;
-        }
-        let d = flat_diff(world_pos, rtf.translation).length();
-        if d < CLICK_ROCK_RADIUS {
-            if nearest_rock.map_or(true, |(_, bd)| d < bd) {
-                nearest_rock = Some((entity, d));
-            }
-        }
-    }
-    if let Some((entity, _)) = nearest_rock {
-        *click_target = PlayerTarget::Mine(entity);
-        if matches!(*action, PlayerAction::Mining { .. }) {
-            *action = PlayerAction::Free;
-        }
-        return;
-    }
-
-    // Move to clicked tile (snapped to grid)
-    let tile = IVec2::new(
-        (world_pos.x / TILE_SIZE).round() as i32,
-        (world_pos.z / TILE_SIZE).round() as i32,
-    );
-    let tile = clamp_tile(tile);
-    *click_target = PlayerTarget::Move(tile);
-    if matches!(*action, PlayerAction::Mining { .. }) {
-        *action = PlayerAction::Free;
+    } else if swing.0 > 0.0 {
+        // Hold swing anim until timer expires
+        *anim = AnimState::Mining;
+    } else if matches!(*anim, AnimState::Walking | AnimState::Mining) {
+        *anim = AnimState::Idle;
     }
 }
 
 // ─────────────────────────────────────────────────────────────
-//  tick_advance  (runs every frame, sets ticked flag once per TICK_RATE)
+//  player_combat_mine  (LMB / Space = attack, E = mine)
 // ─────────────────────────────────────────────────────────────
-fn tick_advance(mut tick: ResMut<TickState>, time: Res<Time>) {
-    tick.timer += time.delta_secs();
-    if tick.timer >= TICK_RATE {
-        tick.timer -= TICK_RATE;
-        tick.ticked = true;
-        tick.count += 1;
-    } else {
-        tick.ticked = false;
-    }
-}
-
-// ─────────────────────────────────────────────────────────────
-//  player_tick  (replaces player_walk + player_combat_mine)
-// ─────────────────────────────────────────────────────────────
-fn player_tick(
+fn player_combat_mine(
+    keys: Res<ButtonInput<KeyCode>>,
+    mouse: Res<ButtonInput<MouseButton>>,
     time: Res<Time>,
-    tick: Res<TickState>,
     phase: Res<GamePhase>,
     mut player_q: Query<
         (
-            &mut TilePos,
-            &mut PrevTilePos,
-            &mut Transform,
+            &Transform,
             &mut AnimState,
             &mut AttackCooldown,
             &mut SwingTimer,
         ),
         With<Player>,
     >,
-    mut rock_q: Query<
-        (
-            Entity,
-            &Transform,
-            &mut Rock,
-            &mut MeshMaterial3d<StandardMaterial>,
-        ),
-        Without<Player>,
-    >,
-    enemy_q: Query<(Entity, &TilePos), (With<Enemy>, Without<Player>)>,
-    mut click_target: ResMut<PlayerTarget>,
+    mut rock_q: Query<(
+        Entity,
+        &Transform,
+        &mut Rock,
+        &mut MeshMaterial3d<StandardMaterial>,
+    )>,
+    enemy_q: Query<(Entity, &Transform), (With<Enemy>, Without<Player>)>,
     mut action: ResMut<PlayerAction>,
     mut inventory: ResMut<Inventory>,
     mut stats: ResMut<PlayerStats>,
@@ -1429,163 +1336,107 @@ fn player_tick(
     if *phase != GamePhase::Playing {
         return;
     }
-    let Ok((mut tile, mut prev_tile, mut tf, mut anim, mut cd, mut swing)) =
-        player_q.get_single_mut()
-    else {
+    let Ok((player_tf, mut anim, mut cd, mut swing)) = player_q.get_single_mut() else {
         return;
     };
+    let dt = time.delta_secs();
 
-    // Always tick swing timer (frame-rate, visual only)
-    swing.0 = (swing.0 - time.delta_secs()).max(0.0);
+    // Tick attack cooldown
+    cd.0 = (cd.0 - dt).max(0.0);
 
-    if !tick.ticked {
-        // Update anim state to reflect current action without moving
-        if matches!(*action, PlayerAction::Mining { .. }) || swing.0 > 0.0 {
+    // ── Auto-attack: swing whenever an enemy is in range and cd is ready ──
+    if cd.0 <= 0.0 {
+        let mut nearest: Option<(Entity, f32)> = None;
+        for (e, etf) in &enemy_q {
+            let d = flat_diff(player_tf.translation, etf.translation).length();
+            if d < ATTACK_RANGE {
+                if nearest.map_or(true, |(_, bd)| d < bd) {
+                    nearest = Some((e, d));
+                }
+            }
+        }
+        if let Some((target, _)) = nearest {
+            damage_events.send(DamageEvent {
+                target,
+                amount: PLAYER_DMG,
+            });
+            cd.0 = PLAYER_ATK_CD;
+            swing.0 = PLAYER_ATK_CD;
             *anim = AnimState::Mining;
         }
-        return;
     }
 
-    // ── On tick: decrement attack cooldown ────────────────────
-    if cd.0 > 0 {
-        cd.0 -= 1;
-    }
-
-    // ── On tick: tick active mining ───────────────────────────
-    if let PlayerAction::Mining {
-        target,
-        ref mut ticks_done,
-        ticks_needed,
-        ore,
-    } = *action
-    {
-        *ticks_done += 1;
-        *anim = AnimState::Mining;
-        if *ticks_done >= ticks_needed {
-            let ore_copy = ore;
-            let target_copy = target;
-            if let Ok((_, _, mut rock, mut mat)) = rock_q.get_mut(target_copy) {
-                rock.depleted = true;
-                rock.respawn_timer = ore_copy.respawn_time();
-                mat.0 = rock.depl_mat.clone();
-            }
-            inventory.add(ore_copy);
-            stats.mining_xp += ore_copy.xp();
-            *action = PlayerAction::Free;
-            *anim = AnimState::Idle;
-        }
-        return;
-    }
-
-    // ── On tick: handle movement and combat ───────────────────
-    let current = (*click_target).clone();
-    match &current {
-        PlayerTarget::None => {
-            if swing.0 <= 0.0 {
-                *anim = AnimState::Idle;
-            }
-        }
-        PlayerTarget::Move(dest) => {
-            if tile.0 == *dest {
-                *click_target = PlayerTarget::None;
-                *anim = AnimState::Idle;
-            } else {
-                prev_tile.0 = tile.0;
-                let next = clamp_tile(step_toward_tile(tile.0, *dest));
-                let dir = Vec3::new((next.x - tile.0.x) as f32, 0.0, (next.y - tile.0.y) as f32);
-                tile.0 = next;
-                if dir.length() > 0.001 {
-                    face(&mut tf, dir);
+    // ── Start mining (E key) ──────────────────────────────────
+    if keys.just_pressed(KeyCode::KeyE) {
+        if matches!(*action, PlayerAction::Free) {
+            let mut nearest: Option<(Entity, f32, OreType)> = None;
+            for (entity, rtf, rock, _) in &rock_q {
+                if rock.depleted {
+                    continue;
                 }
-                *anim = AnimState::Walking;
-            }
-        }
-        PlayerTarget::Attack(entity) => {
-            if let Ok((_, etile)) = enemy_q.get(*entity) {
-                let dist = tile_dist(tile.0, etile.0);
-                if dist <= 1.5 {
-                    // In attack range
-                    if cd.0 == 0 {
-                        damage_events.send(DamageEvent {
-                            target: *entity,
-                            amount: PLAYER_DMG,
-                        });
-                        cd.0 = PLAYER_ATK_TICKS;
-                        swing.0 = SWING_DURATION;
-                        *anim = AnimState::Mining;
-                    } else {
-                        *anim = AnimState::Idle;
-                    }
-                } else {
-                    // Step toward enemy
-                    prev_tile.0 = tile.0;
-                    let next = clamp_tile(step_toward_tile(tile.0, etile.0));
-                    let dir =
-                        Vec3::new((next.x - tile.0.x) as f32, 0.0, (next.y - tile.0.y) as f32);
-                    tile.0 = next;
-                    if dir.length() > 0.001 {
-                        face(&mut tf, dir);
-                    }
-                    *anim = AnimState::Walking;
-                }
-            } else {
-                *click_target = PlayerTarget::None;
-                *anim = AnimState::Idle;
-            }
-        }
-        PlayerTarget::Mine(entity) => {
-            let rock_info = rock_q
-                .get(*entity)
-                .ok()
-                .map(|(_, rtf, rock, _)| (world_to_tile(rtf.translation), rock.depleted, rock.ore));
-            if let Some((rock_tile, depleted, ore)) = rock_info {
-                if depleted {
-                    *click_target = PlayerTarget::None;
-                    *anim = AnimState::Idle;
-                } else {
-                    let dist = tile_dist(tile.0, rock_tile);
-                    if dist <= 1.5 {
-                        // Adjacent — start mining
-                        *action = PlayerAction::Mining {
-                            target: *entity,
-                            ticks_done: 0,
-                            ticks_needed: ore.mine_ticks(),
-                            ore,
-                        };
-                        *click_target = PlayerTarget::None;
-                        *anim = AnimState::Mining;
-                    } else {
-                        // Step toward rock
-                        prev_tile.0 = tile.0;
-                        let next = clamp_tile(step_toward_tile(tile.0, rock_tile));
-                        let dir =
-                            Vec3::new((next.x - tile.0.x) as f32, 0.0, (next.y - tile.0.y) as f32);
-                        tile.0 = next;
-                        if dir.length() > 0.001 {
-                            face(&mut tf, dir);
-                        }
-                        *anim = AnimState::Walking;
+                let d = flat_diff(player_tf.translation, rtf.translation).length();
+                if d < INTERACT_DIST {
+                    if nearest.map_or(true, |(_, bd, _)| d < bd) {
+                        nearest = Some((entity, d, rock.ore));
                     }
                 }
-            } else {
-                *click_target = PlayerTarget::None;
-                *anim = AnimState::Idle;
+            }
+            if let Some((target, _, ore)) = nearest {
+                *action = PlayerAction::Mining {
+                    target,
+                    progress: 0.0,
+                    total: ore.mine_time(),
+                    ore,
+                };
+                *anim = AnimState::Mining;
             }
         }
     }
+
+    // ── Tick active mining ────────────────────────────────────
+    let current = std::mem::replace(&mut *action, PlayerAction::Free);
+    *action = match current {
+        PlayerAction::Mining {
+            target,
+            progress,
+            total,
+            ore,
+        } => {
+            let new_p = progress + dt;
+            if new_p >= total {
+                // Complete — deplete the rock and collect ore
+                if let Ok((_, _, mut rock, mut mat)) = rock_q.get_mut(target) {
+                    rock.depleted = true;
+                    rock.respawn_timer = ore.respawn_time();
+                    mat.0 = rock.depl_mat.clone();
+                }
+                inventory.add(ore);
+                stats.mining_xp += ore.xp();
+                *anim = AnimState::Idle;
+                PlayerAction::Free
+            } else {
+                *anim = AnimState::Mining;
+                PlayerAction::Mining {
+                    target,
+                    progress: new_p,
+                    total,
+                    ore,
+                }
+            }
+        }
+        other => other,
+    };
 }
 
 // ─────────────────────────────────────────────────────────────
-//  enemy_tick  (replaces ai_update)
+//  ai_update
 // ─────────────────────────────────────────────────────────────
-fn enemy_tick(
-    tick: Res<TickState>,
+fn ai_update(
+    time: Res<Time>,
     phase: Res<GamePhase>,
-    player_q: Query<(Entity, &TilePos), (With<Player>, Without<Enemy>)>,
+    player_q: Query<&Transform, (With<Player>, Without<Enemy>)>,
     mut enemy_q: Query<
         (
-            &mut TilePos,
-            &mut PrevTilePos,
             &mut Transform,
             &mut Enemy,
             &mut AnimState,
@@ -1594,142 +1445,117 @@ fn enemy_tick(
         Without<Player>,
     >,
     mut damage_events: EventWriter<DamageEvent>,
+    player_entity_q: Query<Entity, With<Player>>,
 ) {
-    if *phase != GamePhase::Playing || !tick.ticked {
+    if *phase != GamePhase::Playing {
         return;
     }
-    let Ok((player_entity, player_tile_comp)) = player_q.get_single() else {
+    let Ok(player_tf) = player_q.get_single() else {
         return;
     };
-    let player_tile = player_tile_comp.0;
+    let Ok(player_entity) = player_entity_q.get_single() else {
+        return;
+    };
+    let dt = time.delta_secs();
 
-    for (mut tile, mut prev_tile, mut tf, mut enemy, mut anim, mut cd) in &mut enemy_q {
+    for (mut tf, mut enemy, mut anim, mut cd) in &mut enemy_q {
         if matches!(enemy.ai, EnemyAi::Dead) {
             continue;
         }
 
-        if cd.0 > 0 {
-            cd.0 -= 1;
-        }
-
-        let dist = tile_dist(tile.0, player_tile);
+        cd.0 = (cd.0 - dt).max(0.0);
+        let to_player = flat_diff(tf.translation, player_tf.translation);
+        let dist = to_player.length();
 
         let new_ai = match enemy.ai.clone() {
-            EnemyAi::Patrolling { idx, wait_ticks } => {
+            EnemyAi::Patrolling { idx, wait } => {
                 if dist < DETECT_RADIUS {
                     *anim = AnimState::Walking;
-                    EnemyAi::Chasing { lose_ticks: 10 }
-                } else if wait_ticks > 0 {
+                    EnemyAi::Chasing { lose_timer: 6.0 }
+                } else if wait > 0.0 {
                     *anim = AnimState::Idle;
                     EnemyAi::Patrolling {
                         idx,
-                        wait_ticks: wait_ticks - 1,
+                        wait: wait - dt,
                     }
                 } else {
-                    let wp = world_to_tile(enemy.patrol[idx]);
-                    if tile_dist(tile.0, wp) < 1.5 {
+                    let wp = enemy.patrol[idx];
+                    let diff = flat_diff(tf.translation, wp);
+                    if diff.length() < 0.4 {
                         let next = (idx + 1) % enemy.patrol.len();
                         *anim = AnimState::Idle;
                         EnemyAi::Patrolling {
                             idx: next,
-                            wait_ticks: 3,
+                            wait: 1.8,
                         }
                     } else {
-                        prev_tile.0 = tile.0;
-                        let next = clamp_tile(step_toward_tile(tile.0, wp));
-                        let dir =
-                            Vec3::new((next.x - tile.0.x) as f32, 0.0, (next.y - tile.0.y) as f32);
-                        tile.0 = next;
-                        if dir.length() > 0.001 {
-                            face(&mut tf, dir);
-                        }
+                        let dir = diff.normalize();
+                        tf.translation += dir * ENEMY_SPEED * dt;
+                        clamp_pos(&mut tf);
+                        face(&mut tf, dir);
                         *anim = AnimState::Walking;
-                        EnemyAi::Patrolling { idx, wait_ticks: 0 }
+                        EnemyAi::Patrolling { idx, wait: 0.0 }
                     }
                 }
             }
 
-            EnemyAi::Chasing { lose_ticks } => {
-                if dist <= 1.5 {
+            EnemyAi::Chasing { lose_timer } => {
+                if dist < ATTACK_RANGE * 0.9 {
                     *anim = AnimState::Mining;
-                    EnemyAi::Attacking
+                    EnemyAi::Attacking { cooldown: 0.0 }
                 } else if dist > LOSE_RADIUS {
-                    let new_t = lose_ticks.saturating_sub(1);
-                    if new_t == 0 {
+                    let new_t = lose_timer - dt;
+                    if new_t <= 0.0 {
                         *anim = AnimState::Idle;
-                        EnemyAi::Patrolling {
-                            idx: 0,
-                            wait_ticks: 0,
-                        }
+                        EnemyAi::Patrolling { idx: 0, wait: 0.0 }
                     } else {
-                        prev_tile.0 = tile.0;
-                        let next = clamp_tile(step_toward_tile(tile.0, player_tile));
-                        let dir =
-                            Vec3::new((next.x - tile.0.x) as f32, 0.0, (next.y - tile.0.y) as f32);
-                        tile.0 = next;
-                        if dir.length() > 0.001 {
-                            face(&mut tf, dir);
-                        }
+                        // Keep chasing but timer ticking
+                        let dir = to_player.normalize();
+                        tf.translation += dir * ENEMY_CHASE * dt;
+                        clamp_pos(&mut tf);
+                        face(&mut tf, dir);
                         *anim = AnimState::Walking;
-                        EnemyAi::Chasing { lose_ticks: new_t }
+                        EnemyAi::Chasing { lose_timer: new_t }
                     }
                 } else {
-                    prev_tile.0 = tile.0;
-                    let next = clamp_tile(step_toward_tile(tile.0, player_tile));
-                    let dir =
-                        Vec3::new((next.x - tile.0.x) as f32, 0.0, (next.y - tile.0.y) as f32);
-                    tile.0 = next;
-                    if dir.length() > 0.001 {
-                        face(&mut tf, dir);
-                    }
+                    let dir = to_player.normalize();
+                    tf.translation += dir * ENEMY_CHASE * dt;
+                    clamp_pos(&mut tf);
+                    face(&mut tf, dir);
                     *anim = AnimState::Walking;
-                    EnemyAi::Chasing { lose_ticks: 10 }
+                    EnemyAi::Chasing { lose_timer: 6.0 }
                 }
             }
 
-            EnemyAi::Attacking => {
-                if dist > 2.5 {
+            EnemyAi::Attacking { cooldown } => {
+                if dist > ATTACK_RANGE * 1.4 {
                     *anim = AnimState::Walking;
-                    EnemyAi::Chasing { lose_ticks: 10 }
+                    EnemyAi::Chasing { lose_timer: 6.0 }
                 } else {
-                    let dir = Vec3::new(
-                        (player_tile.x - tile.0.x) as f32,
-                        0.0,
-                        (player_tile.y - tile.0.y) as f32,
-                    );
-                    if dir.length() > 0.001 {
-                        face(&mut tf, dir);
+                    // Face player
+                    if to_player.length() > 0.01 {
+                        face(&mut tf, to_player.normalize());
                     }
                     *anim = AnimState::Mining;
-                    if cd.0 == 0 {
+                    if cooldown <= 0.0 {
                         damage_events.send(DamageEvent {
                             target: player_entity,
                             amount: ENEMY_DMG,
                         });
-                        cd.0 = ENEMY_ATK_TICKS;
+                        EnemyAi::Attacking {
+                            cooldown: ENEMY_ATK_CD,
+                        }
+                    } else {
+                        EnemyAi::Attacking {
+                            cooldown: cooldown - dt,
+                        }
                     }
-                    EnemyAi::Attacking
                 }
             }
 
             EnemyAi::Dead => EnemyAi::Dead,
         };
         enemy.ai = new_ai;
-    }
-}
-
-// ─────────────────────────────────────────────────────────────
-//  interpolate_movement  (lerp Transform between prev and cur tile)
-// ─────────────────────────────────────────────────────────────
-fn interpolate_movement(
-    tick: Res<TickState>,
-    mut q: Query<(&TilePos, &PrevTilePos, &mut Transform)>,
-) {
-    let alpha = (tick.timer / TICK_RATE).clamp(0.0, 1.0);
-    for (cur, prev, mut tf) in &mut q {
-        let from = Vec3::new(prev.0.x as f32, 0.0, prev.0.y as f32);
-        let to = Vec3::new(cur.0.x as f32, 0.0, cur.0.y as f32);
-        tf.translation = from.lerp(to, alpha);
     }
 }
 
@@ -1907,30 +1733,24 @@ fn animate_characters(
                 if use_swing {
                     let sw = swing.unwrap();
                     // phase 0 = swing just started, 1 = swing finished
-                    let phase = (1.0 - sw.0 / SWING_DURATION).clamp(0.0, 1.0);
-                    // 0..0.30  windup  : arm raises from rest up overhead
-                    // 0.30..0.45 slam  : arm comes down hard and forward
-                    // 0.45..1.0 return : arm swings back to rest
-                    let arm_x = if phase < 0.30 {
-                        lerp(-0.1, -2.9, phase / 0.30)
-                    } else if phase < 0.45 {
-                        lerp(-2.9, 1.1, (phase - 0.30) / 0.15)
+                    let phase = (1.0 - sw.0 / PLAYER_ATK_CD).clamp(0.0, 1.0);
+                    // windup (0..0.25) → impact (0.25) → follow-through/return (0.25..1.0)
+                    let arm_x = if phase < 0.25 {
+                        // raise arm back overhead quickly
+                        lerp(-1.6, 2.2, phase / 0.25)
                     } else {
-                        lerp(1.1, -0.1, (phase - 0.45) / 0.55)
+                        // swing through and return to rest
+                        lerp(2.2, -0.1, (phase - 0.25) / 0.75)
                     };
-                    let support_x = if phase < 0.30 {
-                        lerp(0.05, -2.2, phase / 0.30)
-                    } else if phase < 0.45 {
-                        lerp(-2.2, 0.7, (phase - 0.30) / 0.15)
+                    let support_x = if phase < 0.25 {
+                        lerp(-0.9, 1.4, phase / 0.25)
                     } else {
-                        lerp(0.7, 0.05, (phase - 0.45) / 0.55)
+                        lerp(1.4, 0.05, (phase - 0.25) / 0.75)
                     };
-                    let lean = if phase < 0.30 {
-                        lerp(0.0, -0.12, phase / 0.30)
-                    } else if phase < 0.45 {
-                        lerp(-0.12, 0.32, (phase - 0.30) / 0.15)
+                    let lean = if phase < 0.25 {
+                        lerp(0.0, 0.30, phase / 0.25)
                     } else {
-                        lerp(0.32, 0.0, (phase - 0.45) / 0.55)
+                        lerp(0.30, 0.0, (phase - 0.25) / 0.75)
                     };
                     sr(
                         &mut transforms,
@@ -2101,11 +1921,11 @@ fn update_hud(
             PlayerAction::Free => String::new(),
             PlayerAction::Mining {
                 ore,
-                ticks_done,
-                ticks_needed,
+                progress,
+                total,
                 ..
             } => {
-                format!("Mining {}...  {}/{}", ore.name(), ticks_done, ticks_needed)
+                format!("Mining {}...  {:.0}%", ore.name(), progress / total * 100.0)
             }
             PlayerAction::Extracting { progress } => {
                 format!("EXTRACTING...  {:.0}%", progress / EXTRACT_TIME * 100.0)
@@ -2115,10 +1935,8 @@ fn update_hud(
     for mut node in &mut extract_fill {
         node.width = Val::Percent(match &*action {
             PlayerAction::Mining {
-                ticks_done,
-                ticks_needed,
-                ..
-            } => (*ticks_done as f32 / *ticks_needed as f32 * 100.0).min(100.0),
+                progress, total, ..
+            } => (progress / total * 100.0).min(100.0),
             PlayerAction::Extracting { progress } => (progress / EXTRACT_TIME * 100.0).min(100.0),
             _ => 0.0,
         });
@@ -2192,8 +2010,6 @@ fn reset_game(
     mut inventory: ResMut<Inventory>,
     mut stats: ResMut<PlayerStats>,
     mut action: ResMut<PlayerAction>,
-    mut click_target: ResMut<PlayerTarget>,
-    mut tick_state: ResMut<TickState>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
@@ -2208,8 +2024,6 @@ fn reset_game(
     *inventory = Inventory::default();
     *stats = PlayerStats::default();
     *action = PlayerAction::Free;
-    *click_target = PlayerTarget::None;
-    *tick_state = TickState::default();
 
     // Re-run setup inline (same as setup but without Startup)
     commands.insert_resource(AmbientLight {
@@ -2265,24 +2079,6 @@ fn face(tf: &mut Transform, dir: Vec3) {
 fn clamp_pos(tf: &mut Transform) {
     tf.translation.x = tf.translation.x.clamp(-BOUNDS_X, BOUNDS_X);
     tf.translation.z = tf.translation.z.clamp(BOUNDS_Z_MIN, BOUNDS_Z_MAX);
-}
-fn tile_dist(a: IVec2, b: IVec2) -> f32 {
-    let d = b - a;
-    ((d.x * d.x + d.y * d.y) as f32).sqrt()
-}
-fn step_toward_tile(from: IVec2, to: IVec2) -> IVec2 {
-    let dx = (to.x - from.x).signum();
-    let dy = (to.y - from.y).signum();
-    IVec2::new(from.x + dx, from.y + dy)
-}
-fn world_to_tile(v: Vec3) -> IVec2 {
-    IVec2::new(v.x.round() as i32, v.z.round() as i32)
-}
-fn clamp_tile(t: IVec2) -> IVec2 {
-    IVec2::new(
-        t.x.clamp(-TILE_BOUNDS_X, TILE_BOUNDS_X),
-        t.y.clamp(TILE_BOUNDS_Z_MIN, TILE_BOUNDS_Z_MAX),
-    )
 }
 
 // ─────────────────────────────────────────────────────────────
