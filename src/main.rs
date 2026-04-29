@@ -3,11 +3,7 @@ use bevy::prelude::*;
 // ── Constants ─────────────────────────────────────────────────
 const WINDOW_W: f32 = 1100.0;
 const WINDOW_H: f32 = 760.0;
-const PLAYER_SPEED: f32 = 4.5;
-const ENEMY_SPEED: f32 = 2.8;
-const ENEMY_CHASE: f32 = 3.6;
-const ATTACK_RANGE: f32 = 2.3;
-const INTERACT_DIST: f32 = 2.0;
+const ATTACK_RANGE: f32 = 2.3; // kept for extraction_update world-distance check
 const DETECT_RADIUS: f32 = 7.5;
 const LOSE_RADIUS: f32 = 22.0;
 const PLAYER_HP: f32 = 100.0;
@@ -22,10 +18,10 @@ const CAM_OFFSET: Vec3 = Vec3::new(0.0, 20.0, 16.0);
 const BOUNDS_X: f32 = 28.0;
 const BOUNDS_Z_MIN: f32 = -34.0;
 const BOUNDS_Z_MAX: f32 = 25.0;
-const TILE_SIZE: f32 = 1.0;
 const CLICK_ENEMY_RADIUS: f32 = 1.4;
 const CLICK_ROCK_RADIUS: f32 = 1.1;
 const MOVER_RADIUS: f32 = 0.30;
+const GAME_TICK: f32 = 0.6; // seconds per tile step, like OSRS
 
 // ── Ore type ──────────────────────────────────────────────────
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -78,22 +74,22 @@ impl OreType {
     }
     fn full_color(self) -> Color {
         match self {
-            Self::Copper => Color::srgb(0.76, 0.40, 0.16),
-            Self::Tin => Color::srgb(0.60, 0.66, 0.68),
-            Self::Iron => Color::srgb(0.50, 0.23, 0.14),
-            Self::Coal => Color::srgb(0.14, 0.12, 0.11),
-            Self::Adamantite => Color::srgb(0.08, 0.26, 0.12),
-            Self::Rune => Color::srgb(0.10, 0.22, 0.35),
+            Self::Copper => Color::srgb(0.72, 0.36, 0.10), // deep burnt orange
+            Self::Tin => Color::srgb(0.55, 0.60, 0.64),    // cool blue-grey
+            Self::Iron => Color::srgb(0.46, 0.20, 0.12),   // dark rust red
+            Self::Coal => Color::srgb(0.11, 0.10, 0.09),   // near-black charcoal
+            Self::Adamantite => Color::srgb(0.05, 0.22, 0.10), // deep forest green
+            Self::Rune => Color::srgb(0.06, 0.18, 0.32),   // deep navy blue
         }
     }
     fn vein_color(self) -> Color {
         match self {
-            Self::Copper => Color::srgb(0.90, 0.55, 0.20),
-            Self::Tin => Color::srgb(0.80, 0.84, 0.88),
-            Self::Iron => Color::srgb(0.70, 0.38, 0.28),
-            Self::Coal => Color::srgb(0.30, 0.28, 0.26),
-            Self::Adamantite => Color::srgb(0.22, 0.65, 0.28),
-            Self::Rune => Color::srgb(0.30, 0.60, 0.90),
+            Self::Copper => Color::srgb(0.95, 0.58, 0.16), // bright warm copper
+            Self::Tin => Color::srgb(0.82, 0.87, 0.92),    // bright silver-white
+            Self::Iron => Color::srgb(0.78, 0.40, 0.28),   // vivid rust
+            Self::Coal => Color::srgb(0.32, 0.30, 0.28),   // dark grey streak
+            Self::Adamantite => Color::srgb(0.18, 0.78, 0.32), // vivid green
+            Self::Rune => Color::srgb(0.26, 0.68, 0.98),   // bright cyan-blue
         }
     }
     fn value(self) -> u32 {
@@ -220,6 +216,30 @@ struct ActionStateLabel;
 #[derive(Component)]
 struct TargetIndicator;
 
+// Tile-based movement (OSRS-style)
+#[derive(Component)]
+struct TilePos {
+    current: IVec2,   // logical tile the entity is ON
+    moving_to: IVec2, // tile being stepped toward this tick
+    lerp: f32,        // visual interpolation 0.0 → 1.0
+}
+impl TilePos {
+    fn from_world(v: Vec3) -> Self {
+        let t = world_to_tile(v);
+        Self {
+            current: t,
+            moving_to: t,
+            lerp: 1.0,
+        }
+    }
+}
+
+#[derive(Resource, Default)]
+struct GameTick {
+    elapsed: f32,
+    ticked: bool,
+}
+
 // Floating damage / XP splat (world-projected UI node)
 #[derive(Component)]
 struct FloatingSplat {
@@ -335,7 +355,7 @@ struct ShouldReset(bool);
 enum PlayerTarget {
     #[default]
     None,
-    Move(Vec3),
+    Move(IVec2), // tile coordinate
     Attack(Entity),
     Mine(Entity),
 }
@@ -379,11 +399,13 @@ fn main() {
         .insert_resource(PlayerTarget::default())
         .insert_resource(ClickIndicators::default())
         .insert_resource(ChatLog::default())
+        .insert_resource(GameTick::default())
         .add_event::<DamageEvent>()
         .add_systems(Startup, setup)
         .add_systems(
             Update,
             (
+                tick_advance,
                 reset_game,
                 handle_click,
                 player_walk,
@@ -480,8 +502,10 @@ fn spawn_world(
     commands.spawn((
         Mesh3d(meshes.add(Plane3d::default().mesh().size(90.0, 90.0))),
         MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgb(0.30, 0.28, 0.25),
-            perceptual_roughness: 0.97,
+            base_color: Color::srgb(0.22, 0.21, 0.19),
+            perceptual_roughness: 0.94,
+            metallic: 0.04,
+            reflectance: 0.12,
             ..default()
         })),
         GameEntity,
@@ -492,8 +516,10 @@ fn spawn_world(
         commands.spawn((
             Mesh3d(meshes.add(Plane3d::default().mesh().size(2.4, 1.1))),
             MeshMaterial3d(materials.add(StandardMaterial {
-                base_color: Color::srgb(0.42, 0.39, 0.34),
-                perceptual_roughness: 0.85,
+                base_color: Color::srgb(0.50, 0.47, 0.42),
+                perceptual_roughness: 0.80,
+                metallic: 0.02,
+                reflectance: 0.18,
                 ..default()
             })),
             Transform::from_xyz(0.0, 0.01, zi as f32),
@@ -503,8 +529,10 @@ fn spawn_world(
 
     // Stone wall border — rectangular blocks like a guild building
     let wall_mat = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.38, 0.34, 0.28),
-        perceptual_roughness: 0.92,
+        base_color: Color::srgb(0.44, 0.40, 0.33),
+        perceptual_roughness: 0.88,
+        metallic: 0.02,
+        reflectance: 0.10,
         ..default()
     });
     // South wall (outside BOUNDS_Z_MIN=-34)
@@ -584,18 +612,21 @@ fn spawn_world(
 
     // Stone mine support pillars (replaces trees — guild has no trees)
     let pillar_mat = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.40, 0.36, 0.30),
-        perceptual_roughness: 0.93,
+        base_color: Color::srgb(0.33, 0.30, 0.26),
+        perceptual_roughness: 0.90,
+        metallic: 0.03,
+        reflectance: 0.12,
         ..default()
     });
     let pillar_cap_mat = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.34, 0.30, 0.24),
-        perceptual_roughness: 0.90,
+        base_color: Color::srgb(0.48, 0.43, 0.36),
+        perceptual_roughness: 0.82,
+        metallic: 0.02,
         ..default()
     });
     let beam_mat = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.32, 0.20, 0.08),
-        perceptual_roughness: 0.95,
+        base_color: Color::srgb(0.38, 0.24, 0.09),
+        perceptual_roughness: 0.92,
         ..default()
     });
     for &[tx, tz] in &[
@@ -662,8 +693,8 @@ fn spawn_world(
 
     // Cover crates/rocks scattered for tactical interest
     let crate_mat = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.38, 0.28, 0.16),
-        perceptual_roughness: 0.85,
+        base_color: Color::srgb(0.46, 0.32, 0.14),
+        perceptual_roughness: 0.88,
         ..default()
     });
     for &[cx, cz, cs] in &[
@@ -694,8 +725,8 @@ fn spawn_world(
 
     // Ruined wall sections (cover)
     let ruin_mat = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.42, 0.38, 0.28),
-        perceptual_roughness: 0.80,
+        base_color: Color::srgb(0.50, 0.44, 0.32),
+        perceptual_roughness: 0.85,
         ..default()
     });
     for &[rx, rz, rw, ra] in &[
@@ -973,6 +1004,7 @@ fn spawn_player(
             AnimState::default(),
             AnimTimer::default(),
             SwingTimer::default(),
+            TilePos::from_world(Vec3::new(0.0, 0.0, 7.0)),
             PlayerLimbs {
                 head,
                 torso,
@@ -1120,6 +1152,7 @@ fn spawn_enemies(
                 AttackCooldown(0.0),
                 AnimState::default(),
                 AnimTimer::default(),
+                TilePos::from_world(Vec3::new(sx, 0.0, sz)),
                 PlayerLimbs {
                     head,
                     torso,
@@ -1719,20 +1752,28 @@ fn handle_click(
         return;
     }
 
-    // Move to clicked ground position
-    let snapped = Vec3::new(
-        (world_pos.x / TILE_SIZE).round() * TILE_SIZE,
-        0.0,
-        (world_pos.z / TILE_SIZE).round() * TILE_SIZE,
+    // Move to clicked ground position — snap to tile grid
+    let tx = world_pos.x.round() as i32;
+    let tz = world_pos.z.round() as i32;
+    let tile = IVec2::new(
+        tx.clamp(-(BOUNDS_X as i32), BOUNDS_X as i32),
+        tz.clamp(BOUNDS_Z_MIN as i32, BOUNDS_Z_MAX as i32),
     );
-    let snapped = Vec3::new(
-        snapped.x.clamp(-BOUNDS_X, BOUNDS_X),
-        0.0,
-        snapped.z.clamp(BOUNDS_Z_MIN, BOUNDS_Z_MAX),
-    );
-    *click_target = PlayerTarget::Move(snapped);
+    *click_target = PlayerTarget::Move(tile);
     if matches!(*action, PlayerAction::Mining { .. }) {
         *action = PlayerAction::Free;
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+//  tick_advance  (advances OSRS-style game tick timer)
+// ─────────────────────────────────────────────────────────────
+fn tick_advance(mut gt: ResMut<GameTick>, time: Res<Time>) {
+    gt.ticked = false;
+    gt.elapsed += time.delta_secs();
+    if gt.elapsed >= GAME_TICK {
+        gt.elapsed -= GAME_TICK;
+        gt.ticked = true;
     }
 }
 
@@ -1742,16 +1783,25 @@ fn handle_click(
 fn player_walk(
     time: Res<Time>,
     phase: Res<GamePhase>,
-    mut player_q: Query<(&mut Transform, &mut AnimState, &mut SwingTimer), With<Player>>,
+    gt: Res<GameTick>,
+    mut player_q: Query<
+        (
+            &mut Transform,
+            &mut TilePos,
+            &mut AnimState,
+            &mut SwingTimer,
+        ),
+        With<Player>,
+    >,
     mut click_target: ResMut<PlayerTarget>,
     mut action: ResMut<PlayerAction>,
-    enemy_q: Query<&Transform, (With<Enemy>, Without<Player>)>,
+    enemy_q: Query<(&Transform, &TilePos), (With<Enemy>, Without<Player>)>,
     rock_q: Query<(Entity, &Transform, &Rock), Without<Player>>,
 ) {
     if *phase != GamePhase::Playing {
         return;
     }
-    let Ok((mut tf, mut anim, mut swing)) = player_q.get_single_mut() else {
+    let Ok((mut tf, mut tp, mut anim, mut swing)) = player_q.get_single_mut() else {
         return;
     };
     let dt = time.delta_secs();
@@ -1759,99 +1809,146 @@ fn player_walk(
     // Tick swing timer
     swing.0 = (swing.0 - dt).max(0.0);
 
+    // ── Visual lerp between tiles every frame ──
+    tp.lerp = (tp.lerp + dt / GAME_TICK).min(1.0);
+    let from = tile_to_world(tp.current);
+    let to = tile_to_world(tp.moving_to);
+    tf.translation.x = from.x + (to.x - from.x) * tp.lerp;
+    tf.translation.z = from.z + (to.z - from.z) * tp.lerp;
+    // Commit tile when lerp finishes
+    if tp.lerp >= 1.0 {
+        tp.current = tp.moving_to;
+    }
+
     // Don't walk while mining
     if matches!(*action, PlayerAction::Mining { .. }) {
         *anim = AnimState::Mining;
         return;
     }
 
-    let current = (*click_target).clone();
-
-    let result = match &current {
-        PlayerTarget::None => {
-            if swing.0 > 0.0 {
-                *anim = AnimState::Mining;
-            } else if matches!(*anim, AnimState::Walking) {
-                *anim = AnimState::Idle;
-            }
-            return;
+    // ── Tile step logic (once per game tick, only when arrived at tile) ──
+    if !gt.ticked || tp.lerp < 1.0 {
+        if swing.0 > 0.0 {
+            *anim = AnimState::Mining;
+        } else if matches!(*anim, AnimState::Walking) && tp.lerp >= 1.0 {
+            *anim = AnimState::Idle;
         }
-        PlayerTarget::Move(pos) => Some((*pos, 0.40_f32)),
-        PlayerTarget::Attack(entity) => match enemy_q.get(*entity) {
-            Ok(etf) => Some((etf.translation, ATTACK_RANGE * 0.80)),
-            Err(_) => {
-                *click_target = PlayerTarget::None;
-                if swing.0 <= 0.0 {
-                    *anim = AnimState::Idle;
-                }
-                return;
-            }
-        },
-        PlayerTarget::Mine(entity) => match rock_q.get(*entity) {
-            Ok((_, rtf, rock)) => {
-                if rock.depleted {
-                    *click_target = PlayerTarget::None;
-                    *anim = AnimState::Idle;
-                    return;
-                }
-                Some((rtf.translation, INTERACT_DIST * 0.9))
-            }
-            Err(_) => {
-                *click_target = PlayerTarget::None;
-                *anim = AnimState::Idle;
-                return;
-            }
-        },
-    };
-
-    let Some((dest, stop_dist)) = result else {
         return;
-    };
+    }
 
-    let diff = flat_diff(tf.translation, dest);
-    let dist = diff.length();
-
-    if dist > stop_dist {
-        let dir = diff.normalize();
-        tf.translation += dir * PLAYER_SPEED * dt;
-        tf.translation.x = tf.translation.x.clamp(-BOUNDS_X, BOUNDS_X);
-        tf.translation.z = tf.translation.z.clamp(BOUNDS_Z_MIN, BOUNDS_Z_MAX);
-        face(&mut tf, dir);
-        if swing.0 <= 0.0 {
-            *anim = AnimState::Walking;
+    let cur = tp.current;
+    match (*click_target).clone() {
+        PlayerTarget::None => {
+            if swing.0 <= 0.0 {
+                *anim = AnimState::Idle;
+            }
         }
-    } else {
-        // Arrived at destination
-        match &current {
-            PlayerTarget::Move(_) => {
+        PlayerTarget::Move(target_tile) => {
+            if cur == target_tile {
                 *click_target = PlayerTarget::None;
                 if swing.0 <= 0.0 {
                     *anim = AnimState::Idle;
                 }
-            }
-            PlayerTarget::Attack(_) => {
-                // Stay in range — auto-attack fires from player_combat_mine
-                if swing.0 > 0.0 {
-                    *anim = AnimState::Mining;
-                } else {
-                    *anim = AnimState::Idle;
+            } else {
+                let step = step_toward_tile(cur, target_tile);
+                let step_clamped = IVec2::new(
+                    step.x.clamp(-(BOUNDS_X as i32), BOUNDS_X as i32),
+                    step.y.clamp(BOUNDS_Z_MIN as i32, BOUNDS_Z_MAX as i32),
+                );
+                let dir = Vec3::new(
+                    (step_clamped.x - cur.x) as f32,
+                    0.0,
+                    (step_clamped.y - cur.y) as f32,
+                );
+                face(&mut tf, dir);
+                tp.moving_to = step_clamped;
+                tp.lerp = 0.0;
+                if swing.0 <= 0.0 {
+                    *anim = AnimState::Walking;
                 }
             }
-            PlayerTarget::Mine(entity) => {
-                if let Ok((_, _, rock)) = rock_q.get(*entity) {
-                    if !rock.depleted {
+        }
+        PlayerTarget::Attack(entity) => {
+            match enemy_q.get(entity) {
+                Ok((_, etp)) => {
+                    let enemy_tile = etp.current;
+                    if tile_chebyshev(cur, enemy_tile) <= 1 {
+                        // In attack range — stay put
+                        if swing.0 > 0.0 {
+                            *anim = AnimState::Mining;
+                        } else {
+                            *anim = AnimState::Idle;
+                        }
+                    } else {
+                        let step = step_toward_tile(cur, enemy_tile);
+                        let step_clamped = IVec2::new(
+                            step.x.clamp(-(BOUNDS_X as i32), BOUNDS_X as i32),
+                            step.y.clamp(BOUNDS_Z_MIN as i32, BOUNDS_Z_MAX as i32),
+                        );
+                        let dir = Vec3::new(
+                            (step_clamped.x - cur.x) as f32,
+                            0.0,
+                            (step_clamped.y - cur.y) as f32,
+                        );
+                        face(&mut tf, dir);
+                        tp.moving_to = step_clamped;
+                        tp.lerp = 0.0;
+                        if swing.0 <= 0.0 {
+                            *anim = AnimState::Walking;
+                        }
+                    }
+                }
+                Err(_) => {
+                    *click_target = PlayerTarget::None;
+                    if swing.0 <= 0.0 {
+                        *anim = AnimState::Idle;
+                    }
+                }
+            }
+        }
+        PlayerTarget::Mine(entity) => {
+            match rock_q.get(entity) {
+                Ok((_, rtf, rock)) => {
+                    if rock.depleted {
+                        *click_target = PlayerTarget::None;
+                        *anim = AnimState::Idle;
+                        return;
+                    }
+                    let rock_tile = world_to_tile(rtf.translation);
+                    if tile_chebyshev(cur, rock_tile) <= 1 {
+                        // Adjacent — start mining
                         *action = PlayerAction::Mining {
-                            target: *entity,
+                            target: entity,
                             progress: 0.0,
                             total: rock.ore.mine_time(),
                             ore: rock.ore,
                         };
                         *anim = AnimState::Mining;
+                        *click_target = PlayerTarget::None;
+                    } else {
+                        let step = step_toward_tile(cur, rock_tile);
+                        let step_clamped = IVec2::new(
+                            step.x.clamp(-(BOUNDS_X as i32), BOUNDS_X as i32),
+                            step.y.clamp(BOUNDS_Z_MIN as i32, BOUNDS_Z_MAX as i32),
+                        );
+                        let dir = Vec3::new(
+                            (step_clamped.x - cur.x) as f32,
+                            0.0,
+                            (step_clamped.y - cur.y) as f32,
+                        );
+                        face(&mut tf, dir);
+                        tp.moving_to = step_clamped;
+                        tp.lerp = 0.0;
+                        if swing.0 <= 0.0 {
+                            *anim = AnimState::Walking;
+                        }
                     }
                 }
-                *click_target = PlayerTarget::None;
+                Err(_) => {
+                    *click_target = PlayerTarget::None;
+                    *anim = AnimState::Idle;
+                }
             }
-            PlayerTarget::None => {}
         }
     }
 }
@@ -1865,6 +1962,7 @@ fn player_combat_mine(
     mut player_q: Query<
         (
             &Transform,
+            &TilePos,
             &mut AnimState,
             &mut AttackCooldown,
             &mut SwingTimer,
@@ -1872,7 +1970,7 @@ fn player_combat_mine(
         With<Player>,
     >,
     mut rock_q: Query<(Entity, &Transform, &mut Rock)>,
-    enemy_q: Query<(Entity, &Transform), (With<Enemy>, Without<Player>)>,
+    enemy_q: Query<(Entity, &Transform, &TilePos), (With<Enemy>, Without<Player>)>,
     mut action: ResMut<PlayerAction>,
     mut inventory: ResMut<Inventory>,
     mut stats: ResMut<PlayerStats>,
@@ -1884,7 +1982,7 @@ fn player_combat_mine(
     if *phase != GamePhase::Playing {
         return;
     }
-    let Ok((player_tf, mut anim, mut cd, mut swing)) = player_q.get_single_mut() else {
+    let Ok((_player_tf, player_tp, mut anim, mut cd, mut swing)) = player_q.get_single_mut() else {
         return;
     };
     let dt = time.delta_secs();
@@ -1895,9 +1993,8 @@ fn player_combat_mine(
     // ── Targeted attack: only swing at the clicked enemy ──
     if cd.0 <= 0.0 {
         if let PlayerTarget::Attack(target_e) = *click_target {
-            if let Ok((_, etf)) = enemy_q.get(target_e) {
-                let d = flat_diff(player_tf.translation, etf.translation).length();
-                if d < ATTACK_RANGE {
+            if let Ok((_, _, etp)) = enemy_q.get(target_e) {
+                if tile_chebyshev(player_tp.current, etp.current) <= 1 {
                     damage_events.send(DamageEvent {
                         target: target_e,
                         amount: PLAYER_DMG,
@@ -1982,11 +2079,11 @@ fn update_indicators(
             ind.tracked = None;
         }
 
-        PlayerTarget::Move(pos) => {
+        PlayerTarget::Move(tile) => {
             drop_indicator(&mut commands, &mut ind.target_ent);
             ind.tracked = None;
 
-            let world = Vec3::new(pos.x, 0.07, pos.z);
+            let world = Vec3::new(tile.x as f32, 0.07, tile.y as f32);
             if let Some(e) = ind.move_ent {
                 if let Ok(mut tf) = ind_tf_q.get_mut(e) {
                     tf.translation = world;
@@ -2117,11 +2214,13 @@ fn drop_indicator(commands: &mut Commands, slot: &mut Option<Entity>) {
 fn ai_update(
     time: Res<Time>,
     phase: Res<GamePhase>,
-    player_q: Query<&Transform, (With<Player>, Without<Enemy>)>,
+    gt: Res<GameTick>,
+    player_q: Query<(&Transform, &TilePos), (With<Player>, Without<Enemy>)>,
     mut enemy_q: Query<
         (
             Entity,
             &mut Transform,
+            &mut TilePos,
             &mut Enemy,
             &mut AnimState,
             &mut AttackCooldown,
@@ -2134,38 +2233,58 @@ fn ai_update(
     if *phase != GamePhase::Playing {
         return;
     }
-    let Ok(player_tf) = player_q.get_single() else {
+    let Ok((player_tf, player_tp)) = player_q.get_single() else {
         return;
     };
     let Ok(player_entity) = player_entity_q.get_single() else {
         return;
     };
     let dt = time.delta_secs();
+    let player_tile = player_tp.current;
 
-    for (enemy_entity, mut tf, mut enemy, mut anim, mut cd) in &mut enemy_q {
+    for (enemy_entity, mut tf, mut tp, mut enemy, mut anim, mut cd) in &mut enemy_q {
         if matches!(enemy.ai, EnemyAi::Dead) {
             continue;
         }
 
-        cd.0 = (cd.0 - dt).max(0.0);
-        let to_player = flat_diff(tf.translation, player_tf.translation);
-        let dist = to_player.length();
+        // ── Visual lerp between tiles every frame ──
+        tp.lerp = (tp.lerp + dt / GAME_TICK).min(1.0);
+        let from = tile_to_world(tp.current);
+        let to_w = tile_to_world(tp.moving_to);
+        tf.translation.x = from.x + (to_w.x - from.x) * tp.lerp;
+        tf.translation.z = from.z + (to_w.z - from.z) * tp.lerp;
+        if tp.lerp >= 1.0 {
+            tp.current = tp.moving_to;
+        }
 
+        // Tick attack cooldown
+        cd.0 = (cd.0 - dt).max(0.0);
+
+        // ── Tile-step logic runs only on tick, only when arrived ──
+        let tile_dist = tile_chebyshev(tp.current, player_tile);
+        let world_dist = flat_diff(tf.translation, player_tf.translation).length();
+
+        if !gt.ticked || tp.lerp < 1.0 {
+            // Just keep current anim state while sliding
+            continue;
+        }
+
+        let cur = tp.current;
         let new_ai = match enemy.ai.clone() {
             EnemyAi::Patrolling { idx, wait } => {
-                if dist < DETECT_RADIUS {
+                if tile_dist <= (DETECT_RADIUS as i32) {
                     *anim = AnimState::Walking;
                     EnemyAi::Chasing { lose_timer: 6.0 }
                 } else if wait > 0.0 {
                     *anim = AnimState::Idle;
                     EnemyAi::Patrolling {
                         idx,
-                        wait: wait - dt,
+                        wait: wait - GAME_TICK,
                     }
                 } else {
                     let wp = enemy.patrol[idx];
-                    let diff = flat_diff(tf.translation, wp);
-                    if diff.length() < 0.4 {
+                    let wp_tile = world_to_tile(wp);
+                    if cur == wp_tile {
                         let next = (idx + 1) % enemy.patrol.len();
                         *anim = AnimState::Idle;
                         EnemyAi::Patrolling {
@@ -2173,10 +2292,11 @@ fn ai_update(
                             wait: 1.8,
                         }
                     } else {
-                        let dir = diff.normalize();
-                        tf.translation += dir * ENEMY_SPEED * dt;
-                        clamp_pos(&mut tf);
+                        let step = step_toward_tile(cur, wp_tile);
+                        let dir = Vec3::new((step.x - cur.x) as f32, 0.0, (step.y - cur.y) as f32);
                         face(&mut tf, dir);
+                        tp.moving_to = step;
+                        tp.lerp = 0.0;
                         *anim = AnimState::Walking;
                         EnemyAi::Patrolling { idx, wait: 0.0 }
                     }
@@ -2184,39 +2304,40 @@ fn ai_update(
             }
 
             EnemyAi::Chasing { lose_timer } => {
-                if dist < ATTACK_RANGE * 0.9 {
+                if tile_dist <= 1 {
                     *anim = AnimState::Mining;
                     EnemyAi::Attacking { cooldown: 0.0 }
-                } else if dist > LOSE_RADIUS {
-                    let new_t = lose_timer - dt;
+                } else if world_dist > LOSE_RADIUS {
+                    let new_t = lose_timer - GAME_TICK;
                     if new_t <= 0.0 {
                         *anim = AnimState::Idle;
                         EnemyAi::Patrolling { idx: 0, wait: 0.0 }
                     } else {
-                        // Keep chasing but timer ticking
-                        let dir = to_player.normalize();
-                        tf.translation += dir * ENEMY_CHASE * dt;
-                        clamp_pos(&mut tf);
+                        let step = step_toward_tile(cur, player_tile);
+                        let dir = Vec3::new((step.x - cur.x) as f32, 0.0, (step.y - cur.y) as f32);
                         face(&mut tf, dir);
+                        tp.moving_to = step;
+                        tp.lerp = 0.0;
                         *anim = AnimState::Walking;
                         EnemyAi::Chasing { lose_timer: new_t }
                     }
                 } else {
-                    let dir = to_player.normalize();
-                    tf.translation += dir * ENEMY_CHASE * dt;
-                    clamp_pos(&mut tf);
+                    let step = step_toward_tile(cur, player_tile);
+                    let dir = Vec3::new((step.x - cur.x) as f32, 0.0, (step.y - cur.y) as f32);
                     face(&mut tf, dir);
+                    tp.moving_to = step;
+                    tp.lerp = 0.0;
                     *anim = AnimState::Walking;
                     EnemyAi::Chasing { lose_timer: 6.0 }
                 }
             }
 
             EnemyAi::Attacking { cooldown } => {
-                if dist > ATTACK_RANGE * 1.4 {
+                if tile_dist > 2 {
                     *anim = AnimState::Walking;
                     EnemyAi::Chasing { lose_timer: 6.0 }
                 } else {
-                    // Face player
+                    let to_player = flat_diff(tf.translation, player_tf.translation);
                     if to_player.length() > 0.01 {
                         face(&mut tf, to_player.normalize());
                     }
@@ -2894,6 +3015,25 @@ fn face(tf: &mut Transform, dir: Vec3) {
 fn clamp_pos(tf: &mut Transform) {
     tf.translation.x = tf.translation.x.clamp(-BOUNDS_X, BOUNDS_X);
     tf.translation.z = tf.translation.z.clamp(BOUNDS_Z_MIN, BOUNDS_Z_MAX);
+}
+
+// ── Tile helpers ──────────────────────────────────────────────
+fn world_to_tile(v: Vec3) -> IVec2 {
+    IVec2::new(v.x.round() as i32, v.z.round() as i32)
+}
+fn tile_to_world(t: IVec2) -> Vec3 {
+    Vec3::new(t.x as f32, 0.0, t.y as f32)
+}
+/// One Chebyshev step from `from` toward `to` (8-directional, like OSRS).
+fn step_toward_tile(from: IVec2, to: IVec2) -> IVec2 {
+    let dx = (to.x - from.x).clamp(-1, 1);
+    let dz = (to.y - from.y).clamp(-1, 1);
+    IVec2::new(from.x + dx, from.y + dz)
+}
+/// Chebyshev distance between two tiles (how many OSRS steps apart).
+fn tile_chebyshev(a: IVec2, b: IVec2) -> i32 {
+    let d = (b - a).abs();
+    d.x.max(d.y)
 }
 
 fn push_from_circle(mover_pos: Vec3, obs_pos: Vec3, obs_r: f32, mover_r: f32) -> Vec3 {
