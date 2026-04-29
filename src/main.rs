@@ -22,6 +22,9 @@ const CAM_OFFSET: Vec3 = Vec3::new(0.0, 20.0, 16.0);
 const BOUNDS_X: f32 = 21.0;
 const BOUNDS_Z_MIN: f32 = -25.0;
 const BOUNDS_Z_MAX: f32 = 19.0;
+const TILE_SIZE: f32 = 1.0;
+const CLICK_ENEMY_RADIUS: f32 = 0.9;
+const CLICK_ROCK_RADIUS: f32 = 1.1;
 
 // ── Ore type ──────────────────────────────────────────────────
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -186,6 +189,10 @@ struct GameOverTitle;
 struct DamageFlash;
 #[derive(Component)]
 struct MiningBarFill;
+#[derive(Component)]
+struct ActionStatePanel;
+#[derive(Component)]
+struct ActionStateLabel;
 
 // ── Resources ─────────────────────────────────────────────────
 #[derive(Resource, Default)]
@@ -242,6 +249,15 @@ enum PlayerAction {
 #[derive(Resource, Default)]
 struct ShouldReset(bool);
 
+#[derive(Resource, Clone, Default)]
+enum PlayerTarget {
+    #[default]
+    None,
+    Move(Vec3),
+    Attack(Entity),
+    Mine(Entity),
+}
+
 // ── Events ────────────────────────────────────────────────────
 #[derive(Event)]
 struct DamageEvent {
@@ -268,13 +284,15 @@ fn main() {
         .insert_resource(Inventory::default())
         .insert_resource(PlayerStats::default())
         .insert_resource(ShouldReset::default())
+        .insert_resource(PlayerTarget::default())
         .add_event::<DamageEvent>()
         .add_systems(Startup, setup)
         .add_systems(
             Update,
             (
                 reset_game,
-                player_movement,
+                handle_click,
+                player_walk,
                 player_combat_mine,
                 ai_update,
                 apply_damage,
@@ -1121,9 +1139,9 @@ fn spawn_hud(commands: &mut Commands) {
         ))
         .with_children(|p| {
             for (key, desc) in &[
-                ("WASD / Arrows", "Move"),
-                ("LMB / Space", "Attack enemy"),
-                ("E", "Mine rock (stand close)"),
+                ("LMB (ground)", "Move"),
+                ("LMB (enemy)", "Chase & attack"),
+                ("LMB (rock)", "Walk & mine"),
                 ("Walk into zone", "Extract & escape"),
                 ("ESC", "Quit"),
             ] {
@@ -1246,17 +1264,146 @@ fn spawn_hud(commands: &mut Commands) {
                 TextColor(Color::srgba(1.0, 1.0, 1.0, 0.65)),
             ));
         });
+
+    // ── Action state banner (top-center) ─────────────────────
+    commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                top: Val::Px(12.0),
+                left: Val::Percent(50.0),
+                padding: UiRect::axes(Val::Px(22.0), Val::Px(8.0)),
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.0)),
+            Visibility::Hidden,
+            ZIndex(4),
+            ActionStatePanel,
+            GameEntity,
+        ))
+        .with_children(|p| {
+            p.spawn((
+                Text::new(""),
+                TextFont {
+                    font_size: 22.0,
+                    ..default()
+                },
+                TextColor(Color::WHITE),
+                ActionStateLabel,
+            ));
+        });
 }
 
 // ─────────────────────────────────────────────────────────────
-//  player_movement  (WASD)
+//  handle_click  (LMB → set PlayerTarget)
 // ─────────────────────────────────────────────────────────────
-fn player_movement(
-    keys: Res<ButtonInput<KeyCode>>,
+fn handle_click(
+    windows: Query<&Window>,
+    camera_q: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    phase: Res<GamePhase>,
+    enemy_q: Query<(Entity, &Transform), With<Enemy>>,
+    rock_q: Query<(Entity, &Transform, &Rock)>,
+    mut click_target: ResMut<PlayerTarget>,
+    mut action: ResMut<PlayerAction>,
+) {
+    if *phase != GamePhase::Playing {
+        return;
+    }
+    if !mouse.just_pressed(MouseButton::Left) {
+        return;
+    }
+    let Ok(window) = windows.get_single() else {
+        return;
+    };
+    let Some(cursor_pos) = window.cursor_position() else {
+        return;
+    };
+    let Ok((camera, cam_gtf)) = camera_q.get_single() else {
+        return;
+    };
+    let Ok(ray) = camera.viewport_to_world(cam_gtf, cursor_pos) else {
+        return;
+    };
+    let dir = Vec3::from(ray.direction);
+    if dir.y.abs() < 1e-5 {
+        return;
+    }
+    let t = -ray.origin.y / dir.y;
+    if t <= 0.0 {
+        return;
+    }
+    let world_pos = ray.origin + dir * t;
+
+    // Check enemies first
+    let mut nearest_enemy: Option<(Entity, f32)> = None;
+    for (entity, etf) in &enemy_q {
+        let d = flat_diff(world_pos, etf.translation).length();
+        if d < CLICK_ENEMY_RADIUS {
+            if nearest_enemy.map_or(true, |(_, bd)| d < bd) {
+                nearest_enemy = Some((entity, d));
+            }
+        }
+    }
+    if let Some((entity, _)) = nearest_enemy {
+        *click_target = PlayerTarget::Attack(entity);
+        if matches!(*action, PlayerAction::Mining { .. }) {
+            *action = PlayerAction::Free;
+        }
+        return;
+    }
+
+    // Check rocks
+    let mut nearest_rock: Option<(Entity, f32)> = None;
+    for (entity, rtf, rock) in &rock_q {
+        if rock.depleted {
+            continue;
+        }
+        let d = flat_diff(world_pos, rtf.translation).length();
+        if d < CLICK_ROCK_RADIUS {
+            if nearest_rock.map_or(true, |(_, bd)| d < bd) {
+                nearest_rock = Some((entity, d));
+            }
+        }
+    }
+    if let Some((entity, _)) = nearest_rock {
+        *click_target = PlayerTarget::Mine(entity);
+        if matches!(*action, PlayerAction::Mining { .. }) {
+            *action = PlayerAction::Free;
+        }
+        return;
+    }
+
+    // Move to clicked ground position
+    let snapped = Vec3::new(
+        (world_pos.x / TILE_SIZE).round() * TILE_SIZE,
+        0.0,
+        (world_pos.z / TILE_SIZE).round() * TILE_SIZE,
+    );
+    let snapped = Vec3::new(
+        snapped.x.clamp(-BOUNDS_X, BOUNDS_X),
+        0.0,
+        snapped.z.clamp(BOUNDS_Z_MIN, BOUNDS_Z_MAX),
+    );
+    *click_target = PlayerTarget::Move(snapped);
+    if matches!(*action, PlayerAction::Mining { .. }) {
+        *action = PlayerAction::Free;
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+//  player_walk  (move toward PlayerTarget)
+// ─────────────────────────────────────────────────────────────
+fn player_walk(
     time: Res<Time>,
     phase: Res<GamePhase>,
     mut player_q: Query<(&mut Transform, &mut AnimState, &mut SwingTimer), With<Player>>,
+    mut click_target: ResMut<PlayerTarget>,
     mut action: ResMut<PlayerAction>,
+    enemy_q: Query<&Transform, (With<Enemy>, Without<Player>)>,
+    rock_q: Query<(Entity, &Transform, &Rock), Without<Player>>,
 ) {
     if *phase != GamePhase::Playing {
         return;
@@ -1264,52 +1411,112 @@ fn player_movement(
     let Ok((mut tf, mut anim, mut swing)) = player_q.get_single_mut() else {
         return;
     };
+    let dt = time.delta_secs();
 
     // Tick swing timer
-    swing.0 = (swing.0 - time.delta_secs()).max(0.0);
+    swing.0 = (swing.0 - dt).max(0.0);
 
-    let mut dir = Vec3::ZERO;
-    if keys.pressed(KeyCode::KeyW) || keys.pressed(KeyCode::ArrowUp) {
-        dir.z -= 1.0;
-    }
-    if keys.pressed(KeyCode::KeyS) || keys.pressed(KeyCode::ArrowDown) {
-        dir.z += 1.0;
-    }
-    if keys.pressed(KeyCode::KeyA) || keys.pressed(KeyCode::ArrowLeft) {
-        dir.x -= 1.0;
-    }
-    if keys.pressed(KeyCode::KeyD) || keys.pressed(KeyCode::ArrowRight) {
-        dir.x += 1.0;
+    // Don't walk while mining
+    if matches!(*action, PlayerAction::Mining { .. }) {
+        *anim = AnimState::Mining;
+        return;
     }
 
-    if dir.length() > 0.01 {
-        let dir = dir.normalize();
-        tf.translation += dir * PLAYER_SPEED * time.delta_secs();
+    let current = (*click_target).clone();
+
+    let result = match &current {
+        PlayerTarget::None => {
+            if swing.0 > 0.0 {
+                *anim = AnimState::Mining;
+            } else if matches!(*anim, AnimState::Walking) {
+                *anim = AnimState::Idle;
+            }
+            return;
+        }
+        PlayerTarget::Move(pos) => Some((*pos, 0.40_f32)),
+        PlayerTarget::Attack(entity) => match enemy_q.get(*entity) {
+            Ok(etf) => Some((etf.translation, ATTACK_RANGE * 0.80)),
+            Err(_) => {
+                *click_target = PlayerTarget::None;
+                if swing.0 <= 0.0 {
+                    *anim = AnimState::Idle;
+                }
+                return;
+            }
+        },
+        PlayerTarget::Mine(entity) => match rock_q.get(*entity) {
+            Ok((_, rtf, rock)) => {
+                if rock.depleted {
+                    *click_target = PlayerTarget::None;
+                    *anim = AnimState::Idle;
+                    return;
+                }
+                Some((rtf.translation, INTERACT_DIST * 0.9))
+            }
+            Err(_) => {
+                *click_target = PlayerTarget::None;
+                *anim = AnimState::Idle;
+                return;
+            }
+        },
+    };
+
+    let Some((dest, stop_dist)) = result else {
+        return;
+    };
+
+    let diff = flat_diff(tf.translation, dest);
+    let dist = diff.length();
+
+    if dist > stop_dist {
+        let dir = diff.normalize();
+        tf.translation += dir * PLAYER_SPEED * dt;
         tf.translation.x = tf.translation.x.clamp(-BOUNDS_X, BOUNDS_X);
         tf.translation.z = tf.translation.z.clamp(BOUNDS_Z_MIN, BOUNDS_Z_MAX);
         face(&mut tf, dir);
-        // Swing anim takes priority over walk during attack
         if swing.0 <= 0.0 {
             *anim = AnimState::Walking;
         }
-        // Cancel mining if moving
-        if matches!(*action, PlayerAction::Mining { .. }) {
-            *action = PlayerAction::Free;
+    } else {
+        // Arrived at destination
+        match &current {
+            PlayerTarget::Move(_) => {
+                *click_target = PlayerTarget::None;
+                if swing.0 <= 0.0 {
+                    *anim = AnimState::Idle;
+                }
+            }
+            PlayerTarget::Attack(_) => {
+                // Stay in range — auto-attack fires from player_combat_mine
+                if swing.0 > 0.0 {
+                    *anim = AnimState::Mining;
+                } else {
+                    *anim = AnimState::Idle;
+                }
+            }
+            PlayerTarget::Mine(entity) => {
+                if let Ok((_, _, rock)) = rock_q.get(*entity) {
+                    if !rock.depleted {
+                        *action = PlayerAction::Mining {
+                            target: *entity,
+                            progress: 0.0,
+                            total: rock.ore.mine_time(),
+                            ore: rock.ore,
+                        };
+                        *anim = AnimState::Mining;
+                    }
+                }
+                *click_target = PlayerTarget::None;
+            }
+            PlayerTarget::None => {}
         }
-    } else if swing.0 > 0.0 {
-        // Hold swing anim until timer expires
-        *anim = AnimState::Mining;
-    } else if matches!(*anim, AnimState::Walking | AnimState::Mining) {
-        *anim = AnimState::Idle;
     }
 }
 
 // ─────────────────────────────────────────────────────────────
-//  player_combat_mine  (LMB / Space = attack, E = mine)
+//  player_combat_mine  (auto-attack + mining tick)
 // ─────────────────────────────────────────────────────────────
 fn player_combat_mine(
-    keys: Res<ButtonInput<KeyCode>>,
-    mouse: Res<ButtonInput<MouseButton>>,
     time: Res<Time>,
     phase: Res<GamePhase>,
     mut player_q: Query<
@@ -1366,33 +1573,6 @@ fn player_combat_mine(
         }
     }
 
-    // ── Start mining (E key) ──────────────────────────────────
-    if keys.just_pressed(KeyCode::KeyE) {
-        if matches!(*action, PlayerAction::Free) {
-            let mut nearest: Option<(Entity, f32, OreType)> = None;
-            for (entity, rtf, rock, _) in &rock_q {
-                if rock.depleted {
-                    continue;
-                }
-                let d = flat_diff(player_tf.translation, rtf.translation).length();
-                if d < INTERACT_DIST {
-                    if nearest.map_or(true, |(_, bd, _)| d < bd) {
-                        nearest = Some((entity, d, rock.ore));
-                    }
-                }
-            }
-            if let Some((target, _, ore)) = nearest {
-                *action = PlayerAction::Mining {
-                    target,
-                    progress: 0.0,
-                    total: ore.mine_time(),
-                    ore,
-                };
-                *anim = AnimState::Mining;
-            }
-        }
-    }
-
     // ── Tick active mining ────────────────────────────────────
     let current = std::mem::replace(&mut *action, PlayerAction::Free);
     *action = match current {
@@ -1404,7 +1584,6 @@ fn player_combat_mine(
         } => {
             let new_p = progress + dt;
             if new_p >= total {
-                // Complete — deplete the rock and collect ore
                 if let Ok((_, _, mut rock, mut mat)) = rock_q.get_mut(target) {
                     rock.depleted = true;
                     rock.respawn_timer = ore.respawn_time();
@@ -1880,8 +2059,9 @@ fn update_hud(
     inventory: Res<Inventory>,
     stats: Res<PlayerStats>,
     player_hp: Query<&Health, With<Player>>,
-    zone_q: Query<&Transform, With<ExtractionZone>>,
     player_tf: Query<&Transform, (With<Player>, Without<ExtractionZone>)>,
+    zone_q: Query<&Transform, With<ExtractionZone>>,
+    enemy_q: Query<&Transform, (With<Enemy>, Without<Player>)>,
     mut texts: ParamSet<(
         Query<&mut Text, With<HpBarText>>,
         Query<&mut Text, With<OreText>>,
@@ -1889,10 +2069,15 @@ fn update_hud(
         Query<&mut Text, With<MiningBarFill>>,
         Query<&mut Text, With<ExtractBar>>,
         Query<&mut Text, With<GameOverTitle>>,
+        Query<&mut Text, With<ActionStateLabel>>,
     )>,
     mut hp_bar_fill: Query<&mut Node, (With<HpBarFill>, Without<ExtractBarFill>)>,
     mut extract_fill: Query<&mut Node, With<ExtractBarFill>>,
     mut overlay: Query<&mut Visibility, With<GameOverlay>>,
+    mut state_panel: Query<
+        (&mut Visibility, &mut BackgroundColor),
+        (With<ActionStatePanel>, Without<GameOverlay>),
+    >,
 ) {
     // HP
     if let Ok(hp) = player_hp.get_single() {
@@ -1957,6 +2142,60 @@ fn update_hud(
         }
     }
 
+    // ── Action state banner ───────────────────────────────────
+    // Determine state: Extracting > Combat > Mining > Idle
+    let in_combat = if let Ok(ptf) = player_tf.get_single() {
+        enemy_q
+            .iter()
+            .any(|etf| flat_diff(ptf.translation, etf.translation).length() < ATTACK_RANGE * 2.0)
+    } else {
+        false
+    };
+
+    enum StateKind {
+        Idle,
+        Mining,
+        Combat,
+        Extracting,
+    }
+    let state = match &*action {
+        PlayerAction::Extracting { .. } => StateKind::Extracting,
+        PlayerAction::Mining { .. } => StateKind::Mining,
+        _ if in_combat => StateKind::Combat,
+        _ => StateKind::Idle,
+    };
+
+    let (label, bg_color, text_color) = match state {
+        StateKind::Idle => ("", Color::srgba(0.0, 0.0, 0.0, 0.0), Color::WHITE),
+        StateKind::Mining => (
+            "  MINING  ",
+            Color::srgba(0.55, 0.38, 0.05, 0.88),
+            Color::srgb(1.0, 0.88, 0.3),
+        ),
+        StateKind::Combat => (
+            "  IN COMBAT  ",
+            Color::srgba(0.55, 0.05, 0.05, 0.88),
+            Color::srgb(1.0, 0.35, 0.35),
+        ),
+        StateKind::Extracting => (
+            "  EXTRACTING  ",
+            Color::srgba(0.05, 0.42, 0.12, 0.88),
+            Color::srgb(0.4, 1.0, 0.55),
+        ),
+    };
+
+    for (mut vis, mut bg) in &mut state_panel {
+        *vis = if label.is_empty() {
+            Visibility::Hidden
+        } else {
+            Visibility::Visible
+        };
+        *bg = BackgroundColor(bg_color);
+    }
+    for mut t in texts.p6().iter_mut() {
+        **t = label.into();
+    }
+
     // Game over overlay
     let show_overlay = *phase != GamePhase::Playing;
     for mut vis in &mut overlay {
@@ -1977,6 +2216,8 @@ fn update_hud(
             GamePhase::Playing => String::new(),
         };
     }
+    // suppress unused variable warning for text_color (used in future styling)
+    let _ = text_color;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -2010,6 +2251,7 @@ fn reset_game(
     mut inventory: ResMut<Inventory>,
     mut stats: ResMut<PlayerStats>,
     mut action: ResMut<PlayerAction>,
+    mut click_target: ResMut<PlayerTarget>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
@@ -2024,6 +2266,7 @@ fn reset_game(
     *inventory = Inventory::default();
     *stats = PlayerStats::default();
     *action = PlayerAction::Free;
+    *click_target = PlayerTarget::None;
 
     // Re-run setup inline (same as setup but without Startup)
     commands.insert_resource(AmbientLight {
