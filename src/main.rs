@@ -19,9 +19,9 @@ const ENEMY_ATK_CD: f32 = 1.50;
 const EXTRACT_TIME: f32 = 3.5;
 const EXTRACT_RADIUS: f32 = 2.5;
 const CAM_OFFSET: Vec3 = Vec3::new(0.0, 20.0, 16.0);
-const BOUNDS_X: f32 = 21.0;
-const BOUNDS_Z_MIN: f32 = -25.0;
-const BOUNDS_Z_MAX: f32 = 19.0;
+const BOUNDS_X: f32 = 28.0;
+const BOUNDS_Z_MIN: f32 = -34.0;
+const BOUNDS_Z_MAX: f32 = 25.0;
 const TILE_SIZE: f32 = 1.0;
 const CLICK_ENEMY_RADIUS: f32 = 1.4;
 const CLICK_ROCK_RADIUS: f32 = 1.1;
@@ -34,6 +34,8 @@ enum OreType {
     Tin,
     Iron,
     Coal,
+    Adamantite,
+    Rune,
 }
 impl OreType {
     fn name(self) -> &'static str {
@@ -42,6 +44,8 @@ impl OreType {
             Self::Tin => "Tin",
             Self::Iron => "Iron",
             Self::Coal => "Coal",
+            Self::Adamantite => "Adamantite",
+            Self::Rune => "Runite",
         }
     }
     fn label(self) -> &'static str {
@@ -50,6 +54,8 @@ impl OreType {
             Self::Tin => "Tin ore",
             Self::Iron => "Iron ore",
             Self::Coal => "Coal",
+            Self::Adamantite => "Adamantite ore",
+            Self::Rune => "Runite ore",
         }
     }
     fn mine_time(self) -> f32 {
@@ -57,6 +63,8 @@ impl OreType {
             Self::Copper | Self::Tin => 2.2,
             Self::Iron => 3.5,
             Self::Coal => 5.0,
+            Self::Adamantite => 7.5,
+            Self::Rune => 12.0,
         }
     }
     fn respawn_time(self) -> f32 {
@@ -64,6 +72,8 @@ impl OreType {
             Self::Copper | Self::Tin => 12.0,
             Self::Iron => 20.0,
             Self::Coal => 30.0,
+            Self::Adamantite => 60.0,
+            Self::Rune => 90.0,
         }
     }
     fn full_color(self) -> Color {
@@ -72,6 +82,8 @@ impl OreType {
             Self::Tin => Color::srgb(0.60, 0.66, 0.68),
             Self::Iron => Color::srgb(0.50, 0.23, 0.14),
             Self::Coal => Color::srgb(0.14, 0.12, 0.11),
+            Self::Adamantite => Color::srgb(0.08, 0.26, 0.12),
+            Self::Rune => Color::srgb(0.10, 0.22, 0.35),
         }
     }
     fn vein_color(self) -> Color {
@@ -80,6 +92,8 @@ impl OreType {
             Self::Tin => Color::srgb(0.80, 0.84, 0.88),
             Self::Iron => Color::srgb(0.70, 0.38, 0.28),
             Self::Coal => Color::srgb(0.30, 0.28, 0.26),
+            Self::Adamantite => Color::srgb(0.22, 0.65, 0.28),
+            Self::Rune => Color::srgb(0.30, 0.60, 0.90),
         }
     }
     fn value(self) -> u32 {
@@ -87,6 +101,8 @@ impl OreType {
             Self::Copper | Self::Tin => 10,
             Self::Iron => 25,
             Self::Coal => 50,
+            Self::Adamantite => 200,
+            Self::Rune => 500,
         }
     }
     fn xp(self) -> u32 {
@@ -94,6 +110,8 @@ impl OreType {
             Self::Copper | Self::Tin => 17,
             Self::Iron => 35,
             Self::Coal => 50,
+            Self::Adamantite => 95,
+            Self::Rune => 125,
         }
     }
 }
@@ -210,6 +228,8 @@ struct Inventory {
     tin: u32,
     iron: u32,
     coal: u32,
+    adamantite: u32,
+    rune: u32,
 }
 impl Inventory {
     fn add(&mut self, o: OreType) {
@@ -218,13 +238,20 @@ impl Inventory {
             OreType::Tin => self.tin += 1,
             OreType::Iron => self.iron += 1,
             OreType::Coal => self.coal += 1,
+            OreType::Adamantite => self.adamantite += 1,
+            OreType::Rune => self.rune += 1,
         }
     }
     fn total(&self) -> u32 {
-        self.copper + self.tin + self.iron + self.coal
+        self.copper + self.tin + self.iron + self.coal + self.adamantite + self.rune
     }
     fn value(&self) -> u32 {
-        self.copper * 10 + self.tin * 10 + self.iron * 25 + self.coal * 50
+        self.copper * 10
+            + self.tin * 10
+            + self.iron * 25
+            + self.coal * 50
+            + self.adamantite * 200
+            + self.rune * 500
     }
     fn clear(&mut self) {
         *self = Self::default();
@@ -401,7 +428,7 @@ fn spawn_world(
 ) {
     // Ground — stone cave floor
     commands.spawn((
-        Mesh3d(meshes.add(Plane3d::default().mesh().size(64.0, 64.0))),
+        Mesh3d(meshes.add(Plane3d::default().mesh().size(90.0, 90.0))),
         MeshMaterial3d(materials.add(StandardMaterial {
             base_color: Color::srgb(0.30, 0.28, 0.25),
             perceptual_roughness: 0.97,
@@ -411,7 +438,7 @@ fn spawn_world(
     ));
 
     // Stone tile path (north-south)
-    for zi in -25..=18i32 {
+    for zi in -34..=25i32 {
         commands.spawn((
             Mesh3d(meshes.add(Plane3d::default().mesh().size(2.4, 1.1))),
             MeshMaterial3d(materials.add(StandardMaterial {
@@ -430,20 +457,48 @@ fn spawn_world(
         perceptual_roughness: 0.92,
         ..default()
     });
-    // South wall
-    for i in -9..=9i32 {
+    // South wall (outside BOUNDS_Z_MIN=-34)
+    for i in -13..=13i32 {
         let x = i as f32 * 2.2;
         commands.spawn((
             Mesh3d(meshes.add(Cuboid::new(2.1, 2.2, 0.7))),
             MeshMaterial3d(wall_mat.clone()),
-            Transform::from_xyz(x, 1.1, -26.5),
+            Transform::from_xyz(x, 1.1, -35.2),
             GameEntity,
         ));
-        // Wall cap / merlons
         commands.spawn((
             Mesh3d(meshes.add(Cuboid::new(0.9, 0.55, 0.75))),
             MeshMaterial3d(wall_mat.clone()),
-            Transform::from_xyz(x - 0.55, 2.5, -26.5),
+            Transform::from_xyz(x - 0.55, 2.5, -35.2),
+            GameEntity,
+        ));
+    }
+    // Side walls (x=±29, z from -34 to +25)
+    for i in -16..=12i32 {
+        let z = i as f32 * 2.2;
+        commands.spawn((
+            Mesh3d(meshes.add(Cuboid::new(0.7, 2.2, 2.1))),
+            MeshMaterial3d(wall_mat.clone()),
+            Transform::from_xyz(-29.5, 1.1, z),
+            GameEntity,
+        ));
+        commands.spawn((
+            Mesh3d(meshes.add(Cuboid::new(0.7, 2.2, 2.1))),
+            MeshMaterial3d(wall_mat.clone()),
+            Transform::from_xyz(29.5, 1.1, z),
+            GameEntity,
+        ));
+    }
+    // North wall (open entrance gap in centre for the path)
+    for i in -13..=13i32 {
+        let x = i as f32 * 2.2;
+        if x.abs() < 1.5 {
+            continue;
+        }
+        commands.spawn((
+            Mesh3d(meshes.add(Cuboid::new(2.1, 2.2, 0.7))),
+            MeshMaterial3d(wall_mat.clone()),
+            Transform::from_xyz(x, 1.1, 26.2),
             GameEntity,
         ));
     }
@@ -494,6 +549,7 @@ fn spawn_world(
         ..default()
     });
     for &[tx, tz] in &[
+        // Original pillars (scaled out slightly)
         [-15.0f32, 3.0],
         [-16.0, -6.0],
         [-14.0, -14.0],
@@ -509,11 +565,23 @@ fn spawn_world(
         [-17.0, 8.0],
         [17.0, 8.0],
         [0.0, 15.0],
+        // Extra pillars for the expanded map area
+        [-24.0, -8.0],
+        [24.0, -8.0],
+        [-23.0, 14.0],
+        [23.0, 14.0],
+        [-22.0, -26.0],
+        [22.0, -26.0],
+        [-8.0, -28.0],
+        [8.0, -28.0],
+        [0.0, 22.0],
+        [-20.0, 0.0],
+        [20.0, 0.0],
     ] {
         let ph = 2.4_f32;
         // Pillar shaft
         commands.spawn((
-            Mesh3d(meshes.add(Cylinder::new(0.20, ph))),
+            Mesh3d(meshes.add(Cylinder::new(0.20, ph).mesh().resolution(24))),
             MeshMaterial3d(pillar_mat.clone()),
             Transform::from_xyz(tx, ph / 2.0, tz),
             Collider::Circle(0.45),
@@ -621,9 +689,13 @@ fn spawn_world(
         (OreType::Coal, -9.0, -18.0),
         (OreType::Iron, 8.0, 12.0),
         (OreType::Copper, -14.0, 10.0),
+        (OreType::Adamantite, -21.0, -24.0),
+        (OreType::Rune, 20.0, -27.0),
     ];
     for &(ore, rx, rz) in rocks {
         let r = match ore {
+            OreType::Rune => 0.90,
+            OreType::Adamantite => 0.75,
             OreType::Coal => 0.78,
             OreType::Iron => 0.65,
             _ => 0.55,
@@ -636,22 +708,37 @@ fn spawn_world(
         ));
         let full_mat = materials.add(StandardMaterial {
             base_color: ore.full_color(),
-            perceptual_roughness: 0.88,
-            metallic: 0.06,
+            perceptual_roughness: 0.82,
+            metallic: match ore {
+                OreType::Adamantite | OreType::Rune => 0.30,
+                OreType::Iron => 0.12,
+                _ => 0.06,
+            },
             ..default()
         });
+        // Scale emissive up for rare ores so they glow visibly
+        let emissive_scale = match ore {
+            OreType::Rune => 0.55,
+            OreType::Adamantite => 0.28,
+            _ => 0.12,
+        };
         let vein_mat = materials.add(StandardMaterial {
             base_color: ore.vein_color(),
             emissive: {
                 let c = ore.vein_color().to_linear();
-                LinearRgba::new(c.red * 0.12, c.green * 0.12, c.blue * 0.12, 1.0)
+                LinearRgba::new(
+                    c.red * emissive_scale,
+                    c.green * emissive_scale,
+                    c.blue * emissive_scale,
+                    1.0,
+                )
             },
-            perceptual_roughness: 0.72,
+            perceptual_roughness: 0.62,
             ..default()
         });
         let rock_e = commands
             .spawn((
-                Mesh3d(meshes.add(Sphere::new(r).mesh().uv(18, 10))),
+                Mesh3d(meshes.add(Sphere::new(r).mesh().uv(32, 18))),
                 MeshMaterial3d(full_mat.clone()),
                 Transform::from_xyz(rx, r, rz),
                 Rock {
@@ -667,7 +754,7 @@ fn spawn_world(
             .id();
         let vein = commands
             .spawn((
-                Mesh3d(meshes.add(Sphere::new(r * 0.52).mesh().uv(10, 6))),
+                Mesh3d(meshes.add(Sphere::new(r * 0.52).mesh().uv(20, 12))),
                 MeshMaterial3d(vein_mat),
                 Transform::from_xyz(0.0, r * 0.1, r * 0.78),
             ))
@@ -700,11 +787,11 @@ fn spawn_world(
         ..default()
     });
 
-    for ex in [-4.5f32, 4.5] {
-        let ez = -22.0_f32;
+    for ex in [-18.0f32, 18.0] {
+        let ez = -30.0_f32;
         // Glowing platform
         commands.spawn((
-            Mesh3d(meshes.add(Cylinder::new(EXTRACT_RADIUS, 0.08))),
+            Mesh3d(meshes.add(Cylinder::new(EXTRACT_RADIUS, 0.08).mesh().resolution(48))),
             MeshMaterial3d(zone_mat.clone()),
             Transform::from_xyz(ex, 0.04, ez),
             ExtractionZone,
@@ -2158,23 +2245,23 @@ fn animate_characters(
                     let sw = swing.unwrap();
                     // phase 0 = swing just started, 1 = swing finished
                     let phase = (1.0 - sw.0 / PLAYER_ATK_CD).clamp(0.0, 1.0);
-                    // windup (0..0.25) → impact (0.25) → follow-through/return (0.25..1.0)
-                    let arm_x = if phase < 0.25 {
-                        // raise arm back overhead quickly
-                        lerp(-1.6, 2.2, phase / 0.25)
+                    // windup (0..0.3) → impact (0.3) → follow-through/return (0.3..1.0)
+                    // Positive rotation_x = arm tip toward camera (wind-up back)
+                    // Negative rotation_x = arm tip away from camera (strike toward enemy)
+                    let arm_x = if phase < 0.30 {
+                        lerp(0.1, 2.4, phase / 0.30) // raise arm up/back
                     } else {
-                        // swing through and return to rest
-                        lerp(2.2, -0.1, (phase - 0.25) / 0.75)
+                        lerp(2.4, -1.4, (phase - 0.30) / 0.70) // slam forward through target
                     };
-                    let support_x = if phase < 0.25 {
-                        lerp(-0.9, 1.4, phase / 0.25)
+                    let support_x = if phase < 0.30 {
+                        lerp(0.0, 1.2, phase / 0.30)
                     } else {
-                        lerp(1.4, 0.05, (phase - 0.25) / 0.75)
+                        lerp(1.2, -0.6, (phase - 0.30) / 0.70)
                     };
-                    let lean = if phase < 0.25 {
-                        lerp(0.0, 0.30, phase / 0.25)
+                    let lean = if phase < 0.30 {
+                        lerp(0.0, -0.22, phase / 0.30) // lean back on wind-up
                     } else {
-                        lerp(0.30, 0.0, (phase - 0.25) / 0.75)
+                        lerp(-0.22, 0.18, (phase - 0.30) / 0.70) // lean forward on strike
                     };
                     sr(
                         &mut transforms,
