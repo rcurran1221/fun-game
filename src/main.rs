@@ -193,6 +193,8 @@ struct MiningBarFill;
 struct ActionStatePanel;
 #[derive(Component)]
 struct ActionStateLabel;
+#[derive(Component)]
+struct TargetIndicator;
 
 // ── Resources ─────────────────────────────────────────────────
 #[derive(Resource, Default)]
@@ -258,6 +260,15 @@ enum PlayerTarget {
     Mine(Entity),
 }
 
+// Tracks spawned click/target indicator entities so they can be repositioned or despawned.
+#[derive(Resource, Default)]
+struct ClickIndicators {
+    move_ent: Option<Entity>,
+    target_ent: Option<Entity>,
+    /// Which entity the target_ent is currently attached to (for change detection).
+    tracked: Option<Entity>,
+}
+
 // ── Events ────────────────────────────────────────────────────
 #[derive(Event)]
 struct DamageEvent {
@@ -285,6 +296,7 @@ fn main() {
         .insert_resource(PlayerStats::default())
         .insert_resource(ShouldReset::default())
         .insert_resource(PlayerTarget::default())
+        .insert_resource(ClickIndicators::default())
         .add_event::<DamageEvent>()
         .add_systems(Startup, setup)
         .add_systems(
@@ -293,6 +305,7 @@ fn main() {
                 reset_game,
                 handle_click,
                 player_walk,
+                update_indicators,
                 player_combat_mine,
                 ai_update,
                 apply_damage,
@@ -1608,6 +1621,157 @@ fn player_combat_mine(
 }
 
 // ─────────────────────────────────────────────────────────────
+//  update_indicators  (click / target visual rings)
+// ─────────────────────────────────────────────────────────────
+fn update_indicators(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    time: Res<Time>,
+    click_target: Res<PlayerTarget>,
+    tf_q: Query<&Transform, Without<TargetIndicator>>,
+    mut ind: ResMut<ClickIndicators>,
+    mut ind_tf_q: Query<&mut Transform, With<TargetIndicator>>,
+) {
+    let pulse = 1.0 + (time.elapsed_secs() * 5.0).sin() * 0.10;
+
+    match &*click_target {
+        PlayerTarget::None => {
+            drop_indicator(&mut commands, &mut ind.move_ent);
+            drop_indicator(&mut commands, &mut ind.target_ent);
+            ind.tracked = None;
+        }
+
+        PlayerTarget::Move(pos) => {
+            drop_indicator(&mut commands, &mut ind.target_ent);
+            ind.tracked = None;
+
+            let world = Vec3::new(pos.x, 0.07, pos.z);
+            if let Some(e) = ind.move_ent {
+                if let Ok(mut tf) = ind_tf_q.get_mut(e) {
+                    tf.translation = world;
+                    tf.scale = Vec3::splat(pulse);
+                }
+            } else {
+                let mat = materials.add(StandardMaterial {
+                    base_color: Color::srgba(0.25, 0.95, 1.0, 0.72),
+                    emissive: LinearRgba::new(0.05, 0.55, 0.85, 1.0),
+                    alpha_mode: AlphaMode::Blend,
+                    unlit: true,
+                    ..default()
+                });
+                let mesh = meshes.add(Torus {
+                    minor_radius: 0.055,
+                    major_radius: 0.32,
+                });
+                ind.move_ent = Some(
+                    commands
+                        .spawn((
+                            Mesh3d(mesh),
+                            MeshMaterial3d(mat),
+                            Transform::from_translation(world),
+                            TargetIndicator,
+                            GameEntity,
+                        ))
+                        .id(),
+                );
+            }
+        }
+
+        PlayerTarget::Attack(target_e) => {
+            drop_indicator(&mut commands, &mut ind.move_ent);
+
+            // Respawn ring if target changed
+            if ind.tracked != Some(*target_e) {
+                drop_indicator(&mut commands, &mut ind.target_ent);
+                ind.tracked = Some(*target_e);
+            }
+
+            if let Ok(etf) = tf_q.get(*target_e) {
+                let world = Vec3::new(etf.translation.x, 0.07, etf.translation.z);
+                if let Some(e) = ind.target_ent {
+                    if let Ok(mut tf) = ind_tf_q.get_mut(e) {
+                        tf.translation = world;
+                        tf.scale = Vec3::splat(pulse);
+                    }
+                } else {
+                    let mat = materials.add(StandardMaterial {
+                        base_color: Color::srgba(1.0, 0.18, 0.18, 0.80),
+                        emissive: LinearRgba::new(0.90, 0.08, 0.08, 1.0),
+                        alpha_mode: AlphaMode::Blend,
+                        unlit: true,
+                        ..default()
+                    });
+                    let mesh = meshes.add(Torus {
+                        minor_radius: 0.065,
+                        major_radius: 0.48,
+                    });
+                    ind.target_ent = Some(
+                        commands
+                            .spawn((
+                                Mesh3d(mesh),
+                                MeshMaterial3d(mat),
+                                Transform::from_translation(world),
+                                TargetIndicator,
+                                GameEntity,
+                            ))
+                            .id(),
+                    );
+                }
+            }
+        }
+
+        PlayerTarget::Mine(target_e) => {
+            drop_indicator(&mut commands, &mut ind.move_ent);
+
+            if ind.tracked != Some(*target_e) {
+                drop_indicator(&mut commands, &mut ind.target_ent);
+                ind.tracked = Some(*target_e);
+            }
+
+            if let Ok(rtf) = tf_q.get(*target_e) {
+                let world = Vec3::new(rtf.translation.x, 0.07, rtf.translation.z);
+                if let Some(e) = ind.target_ent {
+                    if let Ok(mut tf) = ind_tf_q.get_mut(e) {
+                        tf.translation = world;
+                        tf.scale = Vec3::splat(pulse);
+                    }
+                } else {
+                    let mat = materials.add(StandardMaterial {
+                        base_color: Color::srgba(1.0, 0.82, 0.12, 0.80),
+                        emissive: LinearRgba::new(0.55, 0.40, 0.04, 1.0),
+                        alpha_mode: AlphaMode::Blend,
+                        unlit: true,
+                        ..default()
+                    });
+                    let mesh = meshes.add(Torus {
+                        minor_radius: 0.065,
+                        major_radius: 0.60,
+                    });
+                    ind.target_ent = Some(
+                        commands
+                            .spawn((
+                                Mesh3d(mesh),
+                                MeshMaterial3d(mat),
+                                Transform::from_translation(world),
+                                TargetIndicator,
+                                GameEntity,
+                            ))
+                            .id(),
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn drop_indicator(commands: &mut Commands, slot: &mut Option<Entity>) {
+    if let Some(e) = slot.take() {
+        commands.entity(e).despawn_recursive();
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
 //  ai_update
 // ─────────────────────────────────────────────────────────────
 fn ai_update(
@@ -2252,6 +2416,7 @@ fn reset_game(
     mut stats: ResMut<PlayerStats>,
     mut action: ResMut<PlayerAction>,
     mut click_target: ResMut<PlayerTarget>,
+    mut click_indicators: ResMut<ClickIndicators>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
@@ -2267,6 +2432,9 @@ fn reset_game(
     *stats = PlayerStats::default();
     *action = PlayerAction::Free;
     *click_target = PlayerTarget::None;
+    // Indicator entities are tagged GameEntity so they're already despawned above;
+    // just clear the stored handles so update_indicators doesn't reference stale IDs.
+    *click_indicators = ClickIndicators::default();
 
     // Re-run setup inline (same as setup but without Startup)
     commands.insert_resource(AmbientLight {
