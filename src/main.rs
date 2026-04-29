@@ -25,6 +25,7 @@ const BOUNDS_Z_MAX: f32 = 19.0;
 const TILE_SIZE: f32 = 1.0;
 const CLICK_ENEMY_RADIUS: f32 = 1.4;
 const CLICK_ROCK_RADIUS: f32 = 1.1;
+const MOVER_RADIUS: f32 = 0.30;
 
 // ── Ore type ──────────────────────────────────────────────────
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -152,6 +153,12 @@ struct Rock {
 struct ExtractionZone;
 #[derive(Component)]
 struct GameEntity; // all entities tagged → despawn on reset
+
+#[derive(Component)]
+enum Collider {
+    Circle(f32),
+    Obb { half_x: f32, half_z: f32 },
+}
 
 // Limbs
 #[derive(Component)]
@@ -308,6 +315,7 @@ fn main() {
                 update_indicators,
                 player_combat_mine,
                 ai_update,
+                resolve_collisions,
                 apply_damage,
                 check_deaths,
                 extraction_update,
@@ -479,6 +487,7 @@ fn spawn_world(
             Mesh3d(meshes.add(Cylinder::new(0.17, h))),
             MeshMaterial3d(trunk_mat.clone()),
             Transform::from_xyz(tx, h / 2.0, tz),
+            Collider::Circle(0.45),
             GameEntity,
         ));
         commands.spawn((
@@ -515,6 +524,7 @@ fn spawn_world(
             Mesh3d(meshes.add(Cuboid::new(cs, cs * 0.8, cs))),
             MeshMaterial3d(crate_mat.clone()),
             Transform::from_xyz(cx, cs * 0.4, cz).with_rotation(Quat::from_rotation_y(cx * 0.5)),
+            Collider::Circle(cs * 0.70),
             GameEntity,
         ));
         commands.spawn((
@@ -544,6 +554,10 @@ fn spawn_world(
             Mesh3d(meshes.add(Cuboid::new(rw, 0.9, 0.25))),
             MeshMaterial3d(ruin_mat.clone()),
             Transform::from_xyz(rx, 0.45, rz).with_rotation(Quat::from_rotation_y(ra)),
+            Collider::Obb {
+                half_x: rw / 2.0 + 0.05,
+                half_z: 0.25,
+            },
             GameEntity,
         ));
     }
@@ -609,6 +623,7 @@ fn spawn_world(
                     full_mat,
                     depl_mat: depl_mat.clone(),
                 },
+                Collider::Circle(r + 0.10),
                 GameEntity,
             ))
             .id();
@@ -2490,6 +2505,126 @@ fn face(tf: &mut Transform, dir: Vec3) {
 fn clamp_pos(tf: &mut Transform) {
     tf.translation.x = tf.translation.x.clamp(-BOUNDS_X, BOUNDS_X);
     tf.translation.z = tf.translation.z.clamp(BOUNDS_Z_MIN, BOUNDS_Z_MAX);
+}
+
+fn push_from_circle(mover_pos: Vec3, obs_pos: Vec3, obs_r: f32, mover_r: f32) -> Vec3 {
+    let diff = Vec3::new(mover_pos.x - obs_pos.x, 0.0, mover_pos.z - obs_pos.z);
+    let dist = diff.length();
+    let min_dist = obs_r + mover_r;
+    if dist < min_dist {
+        if dist < 1e-4 {
+            Vec3::new(min_dist, 0.0, 0.0)
+        } else {
+            diff.normalize() * (min_dist - dist)
+        }
+    } else {
+        Vec3::ZERO
+    }
+}
+
+fn push_from_obb(
+    mover_pos: Vec3,
+    box_tf: &Transform,
+    half_x: f32,
+    half_z: f32,
+    mover_r: f32,
+) -> Vec3 {
+    let rel = Vec3::new(
+        mover_pos.x - box_tf.translation.x,
+        0.0,
+        mover_pos.z - box_tf.translation.z,
+    );
+    let inv_rot = box_tf.rotation.inverse();
+    let local = inv_rot * rel;
+    let lx = local.x;
+    let lz = local.z;
+
+    let cx = lx.clamp(-half_x, half_x);
+    let cz = lz.clamp(-half_z, half_z);
+    let diff = Vec3::new(lx - cx, 0.0, lz - cz);
+    let dist = diff.length();
+    let min_dist = mover_r;
+
+    if dist < min_dist {
+        let push_local = if dist < 1e-4 {
+            // Inside the box — push out along shortest axis
+            let dx = half_x - lx.abs();
+            let dz = half_z - lz.abs();
+            if dx < dz {
+                Vec3::new(lx.signum() * (dx + min_dist), 0.0, 0.0)
+            } else {
+                Vec3::new(0.0, 0.0, lz.signum() * (dz + min_dist))
+            }
+        } else {
+            diff.normalize() * (min_dist - dist)
+        };
+        box_tf.rotation * push_local
+    } else {
+        Vec3::ZERO
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+//  resolve_collisions  (push movers out of static colliders + each other)
+// ─────────────────────────────────────────────────────────────
+fn resolve_collisions(
+    static_q: Query<(&Transform, &Collider), (Without<Player>, Without<Enemy>)>,
+    mut mover_q: Query<(Entity, &mut Transform), Or<(With<Player>, With<Enemy>)>>,
+) {
+    // Step 1: Push movers out of static colliders
+    let entity_ids: Vec<Entity> = mover_q.iter().map(|(e, _)| e).collect();
+    for entity in &entity_ids {
+        let Ok((_, mut tf)) = mover_q.get_mut(*entity) else {
+            continue;
+        };
+        let pos = tf.translation;
+        let mut push = Vec3::ZERO;
+        for (box_tf, collider) in &static_q {
+            push += match collider {
+                Collider::Circle(r) => push_from_circle(pos, box_tf.translation, *r, MOVER_RADIUS),
+                Collider::Obb { half_x, half_z } => {
+                    push_from_obb(pos, box_tf, *half_x, *half_z, MOVER_RADIUS)
+                }
+            };
+        }
+        if push.length_squared() > 1e-8 {
+            tf.translation += push;
+            clamp_pos(&mut tf);
+        }
+    }
+
+    // Step 2: Push movers away from each other
+    let movers: Vec<(Entity, Vec3)> = mover_q.iter().map(|(e, tf)| (e, tf.translation)).collect();
+    let n = movers.len();
+    let mut corrections = vec![Vec3::ZERO; n];
+    let min_dist = MOVER_RADIUS * 2.0;
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let diff = Vec3::new(
+                movers[i].1.x - movers[j].1.x,
+                0.0,
+                movers[i].1.z - movers[j].1.z,
+            );
+            let dist = diff.length();
+            if dist < min_dist {
+                let push = if dist < 1e-4 {
+                    Vec3::new(min_dist * 0.5, 0.0, 0.0)
+                } else {
+                    diff.normalize() * (min_dist - dist) * 0.5
+                };
+                corrections[i] += push;
+                corrections[j] -= push;
+            }
+        }
+    }
+    for (i, (entity, _)) in movers.iter().enumerate() {
+        if corrections[i].length_squared() > 1e-8 {
+            if let Ok((_, mut tf)) = mover_q.get_mut(*entity) {
+                tf.translation += corrections[i];
+                clamp_pos(&mut tf);
+            }
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────
