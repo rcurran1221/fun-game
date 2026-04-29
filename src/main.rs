@@ -9,7 +9,7 @@ const ENEMY_CHASE: f32 = 5.6;
 const ATTACK_RANGE: f32 = 2.3;
 const INTERACT_DIST: f32 = 2.0;
 const DETECT_RADIUS: f32 = 7.5;
-const LOSE_RADIUS: f32 = 11.0;
+const LOSE_RADIUS: f32 = 22.0;
 const PLAYER_HP: f32 = 100.0;
 const ENEMY_HP: f32 = 60.0;
 const PLAYER_DMG: f32 = 30.0;
@@ -19,9 +19,9 @@ const ENEMY_ATK_CD: f32 = 1.50;
 const EXTRACT_TIME: f32 = 3.5;
 const EXTRACT_RADIUS: f32 = 2.5;
 const CAM_OFFSET: Vec3 = Vec3::new(0.0, 20.0, 16.0);
-const BOUNDS_X: f32 = 10.5;
-const BOUNDS_Z_MIN: f32 = -12.5;
-const BOUNDS_Z_MAX: f32 = 9.5;
+const BOUNDS_X: f32 = 21.0;
+const BOUNDS_Z_MIN: f32 = -25.0;
+const BOUNDS_Z_MAX: f32 = 19.0;
 
 // ── Ore type ──────────────────────────────────────────────────
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -162,6 +162,8 @@ struct PlayerLimbs {
 }
 #[derive(Component, Default)]
 struct AnimTimer(f32);
+#[derive(Component, Default)]
+struct SwingTimer(f32);
 
 // UI
 #[derive(Component)]
@@ -184,6 +186,8 @@ struct GameOverTitle;
 struct DamageFlash;
 #[derive(Component)]
 struct MiningBarFill;
+#[derive(Component)]
+struct AttackRangeIndicator;
 
 // ── Resources ─────────────────────────────────────────────────
 #[derive(Resource, Default)]
@@ -350,7 +354,7 @@ fn spawn_world(
 ) {
     // Ground
     commands.spawn((
-        Mesh3d(meshes.add(Plane3d::default().mesh().size(32.0, 32.0))),
+        Mesh3d(meshes.add(Plane3d::default().mesh().size(64.0, 64.0))),
         MeshMaterial3d(materials.add(StandardMaterial {
             base_color: Color::srgb(0.18, 0.28, 0.12),
             perceptual_roughness: 0.97,
@@ -360,7 +364,7 @@ fn spawn_world(
     ));
 
     // Dirt path (north-south)
-    for zi in -12..=9i32 {
+    for zi in -25..=18i32 {
         commands.spawn((
             Mesh3d(meshes.add(Plane3d::default().mesh().size(2.4, 1.1))),
             MeshMaterial3d(materials.add(StandardMaterial {
@@ -379,35 +383,35 @@ fn spawn_world(
         perceptual_roughness: 0.95,
         ..default()
     });
-    for i in -10..=10i32 {
+    for i in -19..=19i32 {
         let x = i as f32 * 1.15;
         let s = 0.38 + (i as f32 * 1.9).sin().abs() * 0.32;
         commands.spawn((
             Mesh3d(meshes.add(Sphere::new(s).mesh().uv(8, 6))),
             MeshMaterial3d(wall_mat.clone()),
-            Transform::from_xyz(x, s, -13.0),
+            Transform::from_xyz(x, s, -26.0),
             GameEntity,
         ));
         commands.spawn((
             Mesh3d(meshes.add(Sphere::new(s * 0.85).mesh().uv(8, 6))),
             MeshMaterial3d(wall_mat.clone()),
-            Transform::from_xyz(x + 0.55, s * 0.85, -13.4),
+            Transform::from_xyz(x + 0.55, s * 0.85, -26.4),
             GameEntity,
         ));
     }
-    for i in -8..=8i32 {
+    for i in -16..=16i32 {
         let z = i as f32 * 1.2;
         let s = 0.32 + (i as f32 * 2.3).cos().abs() * 0.28;
         commands.spawn((
             Mesh3d(meshes.add(Sphere::new(s).mesh().uv(8, 6))),
             MeshMaterial3d(wall_mat.clone()),
-            Transform::from_xyz(-11.5, s, z),
+            Transform::from_xyz(-22.5, s, z),
             GameEntity,
         ));
         commands.spawn((
             Mesh3d(meshes.add(Sphere::new(s).mesh().uv(8, 6))),
             MeshMaterial3d(wall_mat.clone()),
-            Transform::from_xyz(11.5, s, z),
+            Transform::from_xyz(22.5, s, z),
             GameEntity,
         ));
     }
@@ -424,16 +428,21 @@ fn spawn_world(
         ..default()
     });
     for &[tx, tz] in &[
-        [-7.5f32, 1.5],
-        [-8.0, -3.0],
-        [-7.0, -7.0],
-        [7.5, 2.0],
-        [8.0, -2.5],
-        [7.0, -7.5],
-        [-4.5, 7.0],
-        [4.5, 7.5],
-        [-3.0, 5.0],
-        [3.0, 5.5],
+        [-15.0f32, 3.0],
+        [-16.0, -6.0],
+        [-14.0, -14.0],
+        [15.0, 4.0],
+        [16.0, -5.0],
+        [14.0, -15.0],
+        [-9.0, 14.0],
+        [9.0, 15.0],
+        [-6.0, 10.0],
+        [6.0, 11.0],
+        [-12.0, -20.0],
+        [12.0, -20.0],
+        [-17.0, 8.0],
+        [17.0, 8.0],
+        [0.0, 15.0],
     ] {
         let h = 1.3 + (tx * 0.4).sin().abs() * 0.5;
         let r = 0.85 + (tz * 0.35).cos().abs() * 0.35;
@@ -464,12 +473,14 @@ fn spawn_world(
         ..default()
     });
     for &[cx, cz, cs] in &[
-        [-3.5f32, -1.5, 0.7],
-        [3.0, -3.0, 0.6],
-        [-4.0, -6.0, 0.65],
-        [4.5, 1.0, 0.55],
-        [-1.5, 3.5, 0.5],
-        [1.5, -8.5, 0.60],
+        [-7.0f32, -3.0, 0.7],
+        [6.0, -6.0, 0.6],
+        [-8.0, -12.0, 0.65],
+        [9.0, 2.0, 0.55],
+        [-3.0, 7.0, 0.5],
+        [3.0, -17.0, 0.60],
+        [-10.0, 5.0, 0.65],
+        [10.0, -10.0, 0.55],
     ] {
         commands.spawn((
             Mesh3d(meshes.add(Cuboid::new(cs, cs * 0.8, cs))),
@@ -493,10 +504,12 @@ fn spawn_world(
         ..default()
     });
     for &[rx, rz, rw, ra] in &[
-        [-5.5f32, -3.5, 2.2, 0.3],
-        [4.5, -5.5, 1.8, -0.4],
-        [-2.0, 2.5, 2.5, 0.1],
-        [2.5, 0.5, 1.5, 0.8],
+        [-11.0f32, -7.0, 2.2, 0.3],
+        [9.0, -11.0, 1.8, -0.4],
+        [-4.0, 5.0, 2.5, 0.1],
+        [5.0, 1.0, 1.5, 0.8],
+        [-7.0, -18.0, 2.0, 0.5],
+        [7.0, -14.0, 1.8, -0.2],
     ] {
         commands.spawn((
             Mesh3d(meshes.add(Cuboid::new(rw, 0.9, 0.25))),
@@ -519,11 +532,14 @@ fn spawn_world(
     });
 
     let rocks: &[(OreType, f32, f32)] = &[
-        (OreType::Copper, -5.5, -0.5),
-        (OreType::Copper, -3.5, 3.5),
-        (OreType::Tin, 2.5, -1.5),
-        (OreType::Iron, 5.0, -4.5),
-        (OreType::Coal, 0.2, -7.5),
+        (OreType::Copper, -11.0, -1.0),
+        (OreType::Copper, -7.0, 7.0),
+        (OreType::Tin, 5.0, -3.0),
+        (OreType::Iron, 10.0, -9.0),
+        (OreType::Coal, 0.5, -15.0),
+        (OreType::Coal, -9.0, -18.0),
+        (OreType::Iron, 8.0, 12.0),
+        (OreType::Copper, -14.0, 10.0),
     ];
     for &(ore, rx, rz) in rocks {
         let r = match ore {
@@ -603,7 +619,7 @@ fn spawn_world(
     });
 
     for ex in [-4.5f32, 4.5] {
-        let ez = -10.5_f32;
+        let ez = -22.0_f32;
         // Glowing platform
         commands.spawn((
             Mesh3d(meshes.add(Cylinder::new(EXTRACT_RADIUS, 0.08))),
@@ -703,6 +719,7 @@ fn spawn_player(
             AttackCooldown(0.0),
             AnimState::default(),
             AnimTimer::default(),
+            SwingTimer::default(),
             PlayerLimbs {
                 head,
                 torso,
@@ -717,6 +734,28 @@ fn spawn_player(
     for c in [head, torso, left_arm, right_arm, left_leg, right_leg] {
         commands.entity(c).set_parent(player);
     }
+
+    // Attack range ring — faint glowing torus at ground level
+    let ring_mat = materials.add(StandardMaterial {
+        base_color: Color::srgba(1.0, 0.25, 0.1, 0.55),
+        emissive: LinearRgba::new(1.2, 0.3, 0.05, 1.0),
+        alpha_mode: AlphaMode::Blend,
+        unlit: true,
+        ..default()
+    });
+    let ring = commands
+        .spawn((
+            Mesh3d(meshes.add(Torus {
+                minor_radius: 0.045,
+                major_radius: ATTACK_RANGE,
+            })),
+            MeshMaterial3d(ring_mat),
+            Transform::from_xyz(0.0, 0.05, 0.0),
+            AttackRangeIndicator,
+            GameEntity,
+        ))
+        .id();
+    commands.entity(ring).set_parent(player);
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -778,24 +817,24 @@ fn spawn_enemies(
     let enemy_defs: &[(&[(f32, f32)], f32, f32)] = &[
         // patrol waypoints (x,z), spawn_x, spawn_z
         (
-            &[(-5.0, -1.5), (-5.0, 2.5), (-2.0, 2.5), (-2.0, -1.5)],
-            -4.5,
-            1.0,
-        ),
-        (
-            &[(4.5, -1.0), (4.5, -5.5), (2.5, -5.5), (2.5, -1.0)],
-            4.0,
-            -2.0,
-        ),
-        (
-            &[(-1.5, -7.0), (1.5, -7.0), (1.5, -5.0), (-1.5, -5.0)],
-            0.0,
-            -6.0,
-        ),
-        (
-            &[(3.5, 5.5), (-3.5, 5.5), (-3.5, 3.0), (3.5, 3.0)],
+            &[(-10.0, -3.0), (-10.0, 5.0), (-4.0, 5.0), (-4.0, -3.0)],
+            -9.0,
             2.0,
-            4.5,
+        ),
+        (
+            &[(9.0, -2.0), (9.0, -11.0), (5.0, -11.0), (5.0, -2.0)],
+            8.0,
+            -4.0,
+        ),
+        (
+            &[(-3.0, -14.0), (3.0, -14.0), (3.0, -10.0), (-3.0, -10.0)],
+            0.0,
+            -12.0,
+        ),
+        (
+            &[(7.0, 11.0), (-7.0, 11.0), (-7.0, 6.0), (7.0, 6.0)],
+            4.0,
+            9.0,
         ),
     ];
 
@@ -1089,6 +1128,40 @@ fn spawn_hud(commands: &mut Commands) {
             ));
         });
 
+    // Controls hint (bottom-right)
+    commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                bottom: Val::Px(10.0),
+                right: Val::Px(10.0),
+                flex_direction: FlexDirection::Column,
+                row_gap: Val::Px(3.0),
+                padding: UiRect::all(Val::Px(10.0)),
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.50)),
+            GameEntity,
+        ))
+        .with_children(|p| {
+            for (key, desc) in &[
+                ("WASD / Arrows", "Move"),
+                ("LMB / Space", "Attack enemy"),
+                ("E", "Mine rock (stand close)"),
+                ("Walk into zone", "Extract & escape"),
+                ("ESC", "Quit"),
+            ] {
+                p.spawn((
+                    Text::new(format!("{:>18}  {}", key, desc)),
+                    TextFont {
+                        font_size: 13.0,
+                        ..default()
+                    },
+                    TextColor(Color::srgba(0.85, 0.85, 0.85, 0.80)),
+                ));
+            }
+        });
+
     // Mining progress bar (bottom-left, shared with extract timer)
     commands
         .spawn((
@@ -1206,15 +1279,18 @@ fn player_movement(
     keys: Res<ButtonInput<KeyCode>>,
     time: Res<Time>,
     phase: Res<GamePhase>,
-    mut player_q: Query<(&mut Transform, &mut AnimState), With<Player>>,
+    mut player_q: Query<(&mut Transform, &mut AnimState, &mut SwingTimer), With<Player>>,
     mut action: ResMut<PlayerAction>,
 ) {
     if *phase != GamePhase::Playing {
         return;
     }
-    let Ok((mut tf, mut anim)) = player_q.get_single_mut() else {
+    let Ok((mut tf, mut anim, mut swing)) = player_q.get_single_mut() else {
         return;
     };
+
+    // Tick swing timer
+    swing.0 = (swing.0 - time.delta_secs()).max(0.0);
 
     let mut dir = Vec3::ZERO;
     if keys.pressed(KeyCode::KeyW) || keys.pressed(KeyCode::ArrowUp) {
@@ -1236,12 +1312,18 @@ fn player_movement(
         tf.translation.x = tf.translation.x.clamp(-BOUNDS_X, BOUNDS_X);
         tf.translation.z = tf.translation.z.clamp(BOUNDS_Z_MIN, BOUNDS_Z_MAX);
         face(&mut tf, dir);
-        *anim = AnimState::Walking;
+        // Swing anim takes priority over walk during attack
+        if swing.0 <= 0.0 {
+            *anim = AnimState::Walking;
+        }
         // Cancel mining if moving
         if matches!(*action, PlayerAction::Mining { .. }) {
             *action = PlayerAction::Free;
         }
-    } else if matches!(*anim, AnimState::Walking) {
+    } else if swing.0 > 0.0 {
+        // Hold swing anim until timer expires
+        *anim = AnimState::Mining;
+    } else if matches!(*anim, AnimState::Walking | AnimState::Mining) {
         *anim = AnimState::Idle;
     }
 }
@@ -1254,7 +1336,15 @@ fn player_combat_mine(
     mouse: Res<ButtonInput<MouseButton>>,
     time: Res<Time>,
     phase: Res<GamePhase>,
-    mut player_q: Query<(&Transform, &mut AnimState, &mut AttackCooldown), With<Player>>,
+    mut player_q: Query<
+        (
+            &Transform,
+            &mut AnimState,
+            &mut AttackCooldown,
+            &mut SwingTimer,
+        ),
+        With<Player>,
+    >,
     mut rock_q: Query<(
         Entity,
         &Transform,
@@ -1270,7 +1360,7 @@ fn player_combat_mine(
     if *phase != GamePhase::Playing {
         return;
     }
-    let Ok((player_tf, mut anim, mut cd)) = player_q.get_single_mut() else {
+    let Ok((player_tf, mut anim, mut cd, mut swing)) = player_q.get_single_mut() else {
         return;
     };
     let dt = time.delta_secs();
@@ -1278,9 +1368,8 @@ fn player_combat_mine(
     // Tick attack cooldown
     cd.0 = (cd.0 - dt).max(0.0);
 
-    // ── Attack (LMB / Space) ──────────────────────────────────
-    let attacking = mouse.just_pressed(MouseButton::Left) || keys.just_pressed(KeyCode::Space);
-    if attacking && cd.0 <= 0.0 {
+    // ── Auto-attack: swing whenever an enemy is in range and cd is ready ──
+    if cd.0 <= 0.0 {
         let mut nearest: Option<(Entity, f32)> = None;
         for (e, etf) in &enemy_q {
             let d = flat_diff(player_tf.translation, etf.translation).length();
@@ -1296,7 +1385,8 @@ fn player_combat_mine(
                 amount: PLAYER_DMG,
             });
             cd.0 = PLAYER_ATK_CD;
-            *anim = AnimState::Mining; // reuse swing anim for attack
+            swing.0 = PLAYER_ATK_CD;
+            *anim = AnimState::Mining;
         }
     }
 
@@ -1603,10 +1693,15 @@ fn extraction_update(
 // ─────────────────────────────────────────────────────────────
 fn animate_characters(
     time: Res<Time>,
-    mut chars: Query<(&PlayerLimbs, &AnimState, &mut AnimTimer)>,
+    mut chars: Query<(
+        &PlayerLimbs,
+        &AnimState,
+        &mut AnimTimer,
+        Option<&SwingTimer>,
+    )>,
     mut transforms: Query<&mut Transform, Without<PlayerLimbs>>,
 ) {
-    for (limbs, state, mut timer) in &mut chars {
+    for (limbs, state, mut timer, swing) in &mut chars {
         timer.0 += time.delta_secs();
         let t = timer.0;
         match state {
@@ -1656,34 +1751,84 @@ fn animate_characters(
                 sty(&mut transforms, limbs.head, 1.05 + bob);
             }
             AnimState::Mining => {
-                let s = (t * 2.8).sin();
-                let imp = s.max(0.0);
-                sr(
-                    &mut transforms,
-                    limbs.right_arm,
-                    Quat::from_rotation_x(s * 1.4 - 0.25),
-                );
-                sr(
-                    &mut transforms,
-                    limbs.left_arm,
-                    Quat::from_rotation_x(-s * 0.45 + 0.10),
-                );
-                sr(
-                    &mut transforms,
-                    limbs.torso,
-                    Quat::from_rotation_x(imp * 0.16),
-                );
-                sr(
-                    &mut transforms,
-                    limbs.head,
-                    Quat::from_rotation_x(imp * 0.10 - 0.05),
-                );
-                sr(&mut transforms, limbs.left_leg, Quat::from_rotation_x(0.08));
-                sr(
-                    &mut transforms,
-                    limbs.right_leg,
-                    Quat::from_rotation_x(-0.08),
-                );
+                // If this entity has an active SwingTimer, use phase-driven attack swing.
+                // Otherwise (enemies, actual mining) fall back to the looping timer anim.
+                let use_swing = swing.map_or(false, |sw| sw.0 > 0.0);
+                if use_swing {
+                    let sw = swing.unwrap();
+                    // phase 0 = swing just started, 1 = swing finished
+                    let phase = (1.0 - sw.0 / PLAYER_ATK_CD).clamp(0.0, 1.0);
+                    // windup (0..0.25) → impact (0.25) → follow-through/return (0.25..1.0)
+                    let arm_x = if phase < 0.25 {
+                        // raise arm back overhead quickly
+                        lerp(-1.6, 2.2, phase / 0.25)
+                    } else {
+                        // swing through and return to rest
+                        lerp(2.2, -0.1, (phase - 0.25) / 0.75)
+                    };
+                    let support_x = if phase < 0.25 {
+                        lerp(-0.9, 1.4, phase / 0.25)
+                    } else {
+                        lerp(1.4, 0.05, (phase - 0.25) / 0.75)
+                    };
+                    let lean = if phase < 0.25 {
+                        lerp(0.0, 0.30, phase / 0.25)
+                    } else {
+                        lerp(0.30, 0.0, (phase - 0.25) / 0.75)
+                    };
+                    sr(
+                        &mut transforms,
+                        limbs.right_arm,
+                        Quat::from_rotation_x(arm_x),
+                    );
+                    sr(
+                        &mut transforms,
+                        limbs.left_arm,
+                        Quat::from_rotation_x(support_x),
+                    );
+                    sr(&mut transforms, limbs.torso, Quat::from_rotation_x(lean));
+                    sr(
+                        &mut transforms,
+                        limbs.head,
+                        Quat::from_rotation_x(lean * 0.4 - 0.05),
+                    );
+                    sr(&mut transforms, limbs.left_leg, Quat::from_rotation_x(0.12));
+                    sr(
+                        &mut transforms,
+                        limbs.right_leg,
+                        Quat::from_rotation_x(-0.12),
+                    );
+                } else {
+                    // Looping mining / enemy attack animation
+                    let s = (t * 3.5).sin();
+                    let imp = s.max(0.0);
+                    sr(
+                        &mut transforms,
+                        limbs.right_arm,
+                        Quat::from_rotation_x(s * 1.4 - 0.25),
+                    );
+                    sr(
+                        &mut transforms,
+                        limbs.left_arm,
+                        Quat::from_rotation_x(-s * 0.45 + 0.10),
+                    );
+                    sr(
+                        &mut transforms,
+                        limbs.torso,
+                        Quat::from_rotation_x(imp * 0.16),
+                    );
+                    sr(
+                        &mut transforms,
+                        limbs.head,
+                        Quat::from_rotation_x(imp * 0.10 - 0.05),
+                    );
+                    sr(&mut transforms, limbs.left_leg, Quat::from_rotation_x(0.08));
+                    sr(
+                        &mut transforms,
+                        limbs.right_leg,
+                        Quat::from_rotation_x(-0.08),
+                    );
+                }
             }
         }
     }
@@ -1714,28 +1859,6 @@ fn update_enemy_hp_bars(
             tf.translation.x = 0.4 * (ratio - 1.0);
         }
     }
-}
-
-// ─────────────────────────────────────────────────────────────
-//  camera_follow
-// ─────────────────────────────────────────────────────────────
-fn camera_follow(
-    player_q: Query<&Transform, (With<Player>, Without<Camera3d>)>,
-    mut cam_q: Query<&mut Transform, With<Camera3d>>,
-    time: Res<Time>,
-) {
-    let Ok(ptf) = player_q.get_single() else {
-        return;
-    };
-    let Ok(mut ctf) = cam_q.get_single_mut() else {
-        return;
-    };
-    let target = ptf.translation + CAM_OFFSET;
-    let pos = ctf
-        .translation
-        .lerp(target, (time.delta_secs() * 7.0).min(1.0));
-    let look = Vec3::new(ptf.translation.x, 0.0, ptf.translation.z - 1.0);
-    *ctf = Transform::from_translation(pos).looking_at(look, Vec3::Y);
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -1969,6 +2092,9 @@ fn reset_game(
 fn flat_diff(from: Vec3, to: Vec3) -> Vec3 {
     Vec3::new(to.x - from.x, 0.0, to.z - from.z)
 }
+fn lerp(a: f32, b: f32, t: f32) -> f32 {
+    a + (b - a) * t.clamp(0.0, 1.0)
+}
 fn face(tf: &mut Transform, dir: Vec3) {
     if dir.length() > 0.001 {
         tf.rotation = Quat::from_rotation_y(dir.x.atan2(dir.z));
@@ -1977,4 +2103,26 @@ fn face(tf: &mut Transform, dir: Vec3) {
 fn clamp_pos(tf: &mut Transform) {
     tf.translation.x = tf.translation.x.clamp(-BOUNDS_X, BOUNDS_X);
     tf.translation.z = tf.translation.z.clamp(BOUNDS_Z_MIN, BOUNDS_Z_MAX);
+}
+
+// ─────────────────────────────────────────────────────────────
+//  camera_follow
+// ─────────────────────────────────────────────────────────────
+fn camera_follow(
+    player_q: Query<&Transform, (With<Player>, Without<Camera3d>)>,
+    mut cam_q: Query<&mut Transform, With<Camera3d>>,
+    time: Res<Time>,
+) {
+    let Ok(ptf) = player_q.get_single() else {
+        return;
+    };
+    let Ok(mut ctf) = cam_q.get_single_mut() else {
+        return;
+    };
+    let target = ptf.translation + CAM_OFFSET;
+    let pos = ctf
+        .translation
+        .lerp(target, (time.delta_secs() * 7.0).min(1.0));
+    let look = Vec3::new(ptf.translation.x, 0.0, ptf.translation.z - 1.0);
+    *ctf = Transform::from_translation(pos).looking_at(look, Vec3::Y);
 }
