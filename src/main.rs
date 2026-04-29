@@ -165,7 +165,6 @@ struct Rock {
     depleted: bool,
     respawn_timer: f32,
     full_mat: Handle<StandardMaterial>,
-    depl_mat: Handle<StandardMaterial>,
 }
 #[derive(Component)]
 struct ExtractionZone;
@@ -355,6 +354,7 @@ struct ClickIndicators {
 struct DamageEvent {
     target: Entity,
     amount: f32,
+    source: Option<Entity>,
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -719,11 +719,6 @@ fn spawn_world(
     }
 
     // ── Rocks ─────────────────────────────────────────────────
-    let depl_mat = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.26, 0.24, 0.22),
-        perceptual_roughness: 0.96,
-        ..default()
-    });
     let dirt_mat = materials.add(StandardMaterial {
         base_color: Color::srgb(0.33, 0.24, 0.12),
         perceptual_roughness: 1.0,
@@ -761,15 +756,17 @@ fn spawn_world(
             OreType::Iron => 0.65,
             _ => 0.55,
         };
+        // Dirt base disc
         commands.spawn((
             Mesh3d(meshes.add(Cylinder::new(r + 0.3, 0.02))),
             MeshMaterial3d(dirt_mat.clone()),
             Transform::from_xyz(rx, 0.01, rz),
             GameEntity,
         ));
+        // All rock pieces share one material handle — mutating it changes all at once
         let full_mat = materials.add(StandardMaterial {
             base_color: ore.full_color(),
-            perceptual_roughness: 0.82,
+            perceptual_roughness: 0.88,
             metallic: match ore {
                 OreType::Adamantite | OreType::Rune => 0.30,
                 OreType::Iron => 0.12,
@@ -777,11 +774,10 @@ fn spawn_world(
             },
             ..default()
         });
-        // Scale emissive up for rare ores so they glow visibly
         let emissive_scale = match ore {
             OreType::Rune => 0.55,
             OreType::Adamantite => 0.28,
-            _ => 0.12,
+            _ => 0.0,
         };
         let vein_mat = materials.add(StandardMaterial {
             base_color: ore.vein_color(),
@@ -797,41 +793,67 @@ fn spawn_world(
             perceptual_roughness: 0.62,
             ..default()
         });
+
+        // Root entity: flat base slab
         let rock_e = commands
             .spawn((
-                Mesh3d(meshes.add(Sphere::new(r).mesh().uv(32, 18))),
+                Mesh3d(meshes.add(Cuboid::new(r * 1.8, r * 0.4, r * 1.5))),
                 MeshMaterial3d(full_mat.clone()),
-                Transform::from_xyz(rx, r, rz),
+                Transform::from_xyz(rx, r * 0.2, rz),
                 Rock {
                     ore,
                     depleted: false,
                     respawn_timer: 0.0,
-                    full_mat,
-                    depl_mat: depl_mat.clone(),
+                    full_mat: full_mat.clone(),
                 },
                 Collider::Circle(r + 0.10),
                 GameEntity,
             ))
             .id();
+
+        // Spike 1 — main tall peak
+        let s1 = commands
+            .spawn((
+                Mesh3d(meshes.add(Cuboid::new(r * 0.70, r * 1.65, r * 0.60))),
+                MeshMaterial3d(full_mat.clone()),
+                Transform::from_xyz(-r * 0.12, r * 0.78, r * 0.08)
+                    .with_rotation(Quat::from_rotation_z(0.16) * Quat::from_rotation_y(-0.28)),
+            ))
+            .id();
+        commands.entity(s1).set_parent(rock_e);
+
+        // Spike 2 — side peak
+        let s2 = commands
+            .spawn((
+                Mesh3d(meshes.add(Cuboid::new(r * 0.52, r * 1.25, r * 0.44))),
+                MeshMaterial3d(full_mat.clone()),
+                Transform::from_xyz(r * 0.48, r * 0.60, -r * 0.18)
+                    .with_rotation(Quat::from_rotation_z(-0.12) * Quat::from_rotation_y(0.40)),
+            ))
+            .id();
+        commands.entity(s2).set_parent(rock_e);
+
+        // Spike 3 — small back
+        let s3 = commands
+            .spawn((
+                Mesh3d(meshes.add(Cuboid::new(r * 0.38, r * 0.88, r * 0.34))),
+                MeshMaterial3d(full_mat.clone()),
+                Transform::from_xyz(-r * 0.35, r * 0.42, -r * 0.35)
+                    .with_rotation(Quat::from_rotation_z(0.10) * Quat::from_rotation_y(0.65)),
+            ))
+            .id();
+        commands.entity(s3).set_parent(rock_e);
+
+        // Vein shard — bright ore colour
         let vein = commands
             .spawn((
-                Mesh3d(meshes.add(Sphere::new(r * 0.52).mesh().uv(20, 12))),
+                Mesh3d(meshes.add(Cuboid::new(r * 0.30, r * 0.45, r * 0.24))),
                 MeshMaterial3d(vein_mat),
-                Transform::from_xyz(0.0, r * 0.1, r * 0.78),
+                Transform::from_xyz(r * 0.15, r * 0.55, r * 0.35)
+                    .with_rotation(Quat::from_rotation_y(-0.5)),
             ))
             .id();
         commands.entity(vein).set_parent(rock_e);
-        // Accent stone
-        commands.spawn((
-            Mesh3d(meshes.add(Sphere::new(r * 0.40).mesh().uv(8, 5))),
-            MeshMaterial3d(materials.add(StandardMaterial {
-                base_color: Color::srgb(0.34, 0.31, 0.28),
-                perceptual_roughness: 0.92,
-                ..default()
-            })),
-            Transform::from_xyz(rx + r * 0.95, r * 0.40, rz + r * 0.45),
-            GameEntity,
-        ));
     }
 
     // ── Extraction zones ──────────────────────────────────────
@@ -1849,18 +1871,15 @@ fn player_combat_mine(
         ),
         With<Player>,
     >,
-    mut rock_q: Query<(
-        Entity,
-        &Transform,
-        &mut Rock,
-        &mut MeshMaterial3d<StandardMaterial>,
-    )>,
+    mut rock_q: Query<(Entity, &Transform, &mut Rock)>,
     enemy_q: Query<(Entity, &Transform), (With<Enemy>, Without<Player>)>,
     mut action: ResMut<PlayerAction>,
     mut inventory: ResMut<Inventory>,
     mut stats: ResMut<PlayerStats>,
     mut damage_events: EventWriter<DamageEvent>,
     mut chat_log: ResMut<ChatLog>,
+    click_target: Res<PlayerTarget>,
+    mut mat_assets: ResMut<Assets<StandardMaterial>>,
 ) {
     if *phase != GamePhase::Playing {
         return;
@@ -1873,25 +1892,22 @@ fn player_combat_mine(
     // Tick attack cooldown
     cd.0 = (cd.0 - dt).max(0.0);
 
-    // ── Auto-attack: swing whenever an enemy is in range and cd is ready ──
+    // ── Targeted attack: only swing at the clicked enemy ──
     if cd.0 <= 0.0 {
-        let mut nearest: Option<(Entity, f32)> = None;
-        for (e, etf) in &enemy_q {
-            let d = flat_diff(player_tf.translation, etf.translation).length();
-            if d < ATTACK_RANGE {
-                if nearest.map_or(true, |(_, bd)| d < bd) {
-                    nearest = Some((e, d));
+        if let PlayerTarget::Attack(target_e) = *click_target {
+            if let Ok((_, etf)) = enemy_q.get(target_e) {
+                let d = flat_diff(player_tf.translation, etf.translation).length();
+                if d < ATTACK_RANGE {
+                    damage_events.send(DamageEvent {
+                        target: target_e,
+                        amount: PLAYER_DMG,
+                        source: None,
+                    });
+                    cd.0 = PLAYER_ATK_CD;
+                    swing.0 = PLAYER_ATK_CD;
+                    *anim = AnimState::Mining;
                 }
             }
-        }
-        if let Some((target, _)) = nearest {
-            damage_events.send(DamageEvent {
-                target,
-                amount: PLAYER_DMG,
-            });
-            cd.0 = PLAYER_ATK_CD;
-            swing.0 = PLAYER_ATK_CD;
-            *anim = AnimState::Mining;
         }
     }
 
@@ -1906,10 +1922,12 @@ fn player_combat_mine(
         } => {
             let new_p = progress + dt;
             if new_p >= total {
-                if let Ok((_, _, mut rock, mut mat)) = rock_q.get_mut(target) {
+                if let Ok((_, _, mut rock)) = rock_q.get_mut(target) {
                     rock.depleted = true;
                     rock.respawn_timer = ore.respawn_time();
-                    mat.0 = rock.depl_mat.clone();
+                    if let Some(mat) = mat_assets.get_mut(&rock.full_mat) {
+                        mat.base_color = Color::srgb(0.24, 0.22, 0.20);
+                    }
                 }
                 let old_level = stats.level();
                 inventory.add(ore);
@@ -2102,6 +2120,7 @@ fn ai_update(
     player_q: Query<&Transform, (With<Player>, Without<Enemy>)>,
     mut enemy_q: Query<
         (
+            Entity,
             &mut Transform,
             &mut Enemy,
             &mut AnimState,
@@ -2123,7 +2142,7 @@ fn ai_update(
     };
     let dt = time.delta_secs();
 
-    for (mut tf, mut enemy, mut anim, mut cd) in &mut enemy_q {
+    for (enemy_entity, mut tf, mut enemy, mut anim, mut cd) in &mut enemy_q {
         if matches!(enemy.ai, EnemyAi::Dead) {
             continue;
         }
@@ -2206,6 +2225,7 @@ fn ai_update(
                         damage_events.send(DamageEvent {
                             target: player_entity,
                             amount: ENEMY_DMG,
+                            source: Some(enemy_entity),
                         });
                         EnemyAi::Attacking {
                             cooldown: ENEMY_ATK_CD,
@@ -2236,6 +2256,7 @@ fn apply_damage(
     player_q: Query<Entity, With<Player>>,
     mut action: ResMut<PlayerAction>,
     mut chat_log: ResMut<ChatLog>,
+    mut click_target: ResMut<PlayerTarget>,
 ) {
     for ev in events.read() {
         if let Ok(mut hp) = health_q.get_mut(ev.target) {
@@ -2279,6 +2300,12 @@ fn apply_damage(
             }
             if matches!(*action, PlayerAction::Extracting { .. }) {
                 *action = PlayerAction::Free;
+            }
+            // Auto-retaliate: if not already targeting an enemy, turn to face attacker
+            if matches!(*click_target, PlayerTarget::None | PlayerTarget::Move(_)) {
+                if let Some(src) = ev.source {
+                    *click_target = PlayerTarget::Attack(src);
+                }
             }
             chat_log.push(
                 format!("You have been hit for {} damage.", ev.amount as i32),
@@ -2548,15 +2575,18 @@ fn update_enemy_hp_bars(
 //  rock_respawn
 // ─────────────────────────────────────────────────────────────
 fn rock_respawn(
-    mut rocks: Query<(&mut Rock, &mut MeshMaterial3d<StandardMaterial>)>,
+    mut rocks: Query<&mut Rock>,
     time: Res<Time>,
+    mut mat_assets: ResMut<Assets<StandardMaterial>>,
 ) {
-    for (mut rock, mut mat) in &mut rocks {
+    for mut rock in &mut rocks {
         if rock.depleted && rock.respawn_timer > 0.0 {
             rock.respawn_timer -= time.delta_secs();
             if rock.respawn_timer <= 0.0 {
                 rock.depleted = false;
-                mat.0 = rock.full_mat.clone();
+                if let Some(mat) = mat_assets.get_mut(&rock.full_mat) {
+                    mat.base_color = rock.ore.full_color();
+                }
             }
         }
     }
