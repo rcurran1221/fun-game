@@ -341,8 +341,8 @@ fn setup(
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     commands.insert_resource(AmbientLight {
-        color: Color::srgb(0.7, 0.75, 0.9),
-        brightness: 280.0,
+        color: Color::srgb(0.55, 0.48, 0.38),
+        brightness: 180.0,
     });
 
     // Camera
@@ -352,28 +352,38 @@ fn setup(
         GameEntity,
     ));
 
-    // Dramatic side-sun
+    // Overhead directional (simulates a dim underground sky)
     commands.spawn((
         DirectionalLight {
-            illuminance: 11_000.0,
+            illuminance: 6_000.0,
             shadows_enabled: true,
-            color: Color::srgb(1.0, 0.92, 0.78),
+            color: Color::srgb(0.88, 0.78, 0.62),
             ..default()
         },
         Transform::from_xyz(-8.0, 14.0, 3.0).looking_at(Vec3::ZERO, Vec3::Y),
         GameEntity,
     ));
-    // Blue fill light
-    commands.spawn((
-        PointLight {
-            intensity: 60_000.0,
-            color: Color::srgb(0.4, 0.55, 1.0),
-            range: 35.0,
-            ..default()
-        },
-        Transform::from_xyz(0.0, 12.0, -8.0),
-        GameEntity,
-    ));
+    // Warm torch fill lights scattered across the guild
+    for &[lx, lz] in &[
+        [-15.0f32, 3.0],
+        [15.0, 4.0],
+        [-9.0, -10.0],
+        [9.0, -10.0],
+        [0.0, -20.0],
+        [-6.0, 10.0],
+        [6.0, 11.0],
+    ] {
+        commands.spawn((
+            PointLight {
+                intensity: 14_000.0,
+                color: Color::srgb(1.0, 0.62, 0.18),
+                range: 14.0,
+                ..default()
+            },
+            Transform::from_xyz(lx, 2.5, lz),
+            GameEntity,
+        ));
+    }
 
     spawn_world(&mut commands, &mut meshes, &mut materials);
     spawn_player(&mut commands, &mut meshes, &mut materials);
@@ -389,24 +399,24 @@ fn spawn_world(
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
 ) {
-    // Ground
+    // Ground — stone cave floor
     commands.spawn((
         Mesh3d(meshes.add(Plane3d::default().mesh().size(64.0, 64.0))),
         MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgb(0.18, 0.28, 0.12),
+            base_color: Color::srgb(0.30, 0.28, 0.25),
             perceptual_roughness: 0.97,
             ..default()
         })),
         GameEntity,
     ));
 
-    // Dirt path (north-south)
+    // Stone tile path (north-south)
     for zi in -25..=18i32 {
         commands.spawn((
             Mesh3d(meshes.add(Plane3d::default().mesh().size(2.4, 1.1))),
             MeshMaterial3d(materials.add(StandardMaterial {
-                base_color: Color::srgb(0.35, 0.27, 0.14),
-                perceptual_roughness: 0.99,
+                base_color: Color::srgb(0.42, 0.39, 0.34),
+                perceptual_roughness: 0.85,
                 ..default()
             })),
             Transform::from_xyz(0.0, 0.01, zi as f32),
@@ -414,54 +424,73 @@ fn spawn_world(
         ));
     }
 
-    // Rocky wall border
+    // Stone wall border — rectangular blocks like a guild building
     let wall_mat = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.28, 0.26, 0.22),
-        perceptual_roughness: 0.95,
+        base_color: Color::srgb(0.38, 0.34, 0.28),
+        perceptual_roughness: 0.92,
         ..default()
     });
-    for i in -19..=19i32 {
-        let x = i as f32 * 1.15;
-        let s = 0.38 + (i as f32 * 1.9).sin().abs() * 0.32;
+    // South wall
+    for i in -9..=9i32 {
+        let x = i as f32 * 2.2;
         commands.spawn((
-            Mesh3d(meshes.add(Sphere::new(s).mesh().uv(8, 6))),
+            Mesh3d(meshes.add(Cuboid::new(2.1, 2.2, 0.7))),
             MeshMaterial3d(wall_mat.clone()),
-            Transform::from_xyz(x, s, -26.0),
+            Transform::from_xyz(x, 1.1, -26.5),
             GameEntity,
         ));
+        // Wall cap / merlons
         commands.spawn((
-            Mesh3d(meshes.add(Sphere::new(s * 0.85).mesh().uv(8, 6))),
+            Mesh3d(meshes.add(Cuboid::new(0.9, 0.55, 0.75))),
             MeshMaterial3d(wall_mat.clone()),
-            Transform::from_xyz(x + 0.55, s * 0.85, -26.4),
+            Transform::from_xyz(x - 0.55, 2.5, -26.5),
             GameEntity,
         ));
     }
-    for i in -16..=16i32 {
-        let z = i as f32 * 1.2;
-        let s = 0.32 + (i as f32 * 2.3).cos().abs() * 0.28;
+    // Side walls (left x=-22.5, right x=22.5)
+    for i in -12..=9i32 {
+        let z = i as f32 * 2.2;
         commands.spawn((
-            Mesh3d(meshes.add(Sphere::new(s).mesh().uv(8, 6))),
+            Mesh3d(meshes.add(Cuboid::new(0.7, 2.2, 2.1))),
             MeshMaterial3d(wall_mat.clone()),
-            Transform::from_xyz(-22.5, s, z),
+            Transform::from_xyz(-22.5, 1.1, z),
             GameEntity,
         ));
         commands.spawn((
-            Mesh3d(meshes.add(Sphere::new(s).mesh().uv(8, 6))),
+            Mesh3d(meshes.add(Cuboid::new(0.7, 2.2, 2.1))),
             MeshMaterial3d(wall_mat.clone()),
-            Transform::from_xyz(22.5, s, z),
+            Transform::from_xyz(22.5, 1.1, z),
+            GameEntity,
+        ));
+    }
+    // North wall (open entrance gap in centre for the path)
+    for i in -9..=9i32 {
+        let x = i as f32 * 2.2;
+        if x.abs() < 1.5 {
+            continue;
+        } // leave entrance gap
+        commands.spawn((
+            Mesh3d(meshes.add(Cuboid::new(2.1, 2.2, 0.7))),
+            MeshMaterial3d(wall_mat.clone()),
+            Transform::from_xyz(x, 1.1, 20.5),
             GameEntity,
         ));
     }
 
-    // Trees
-    let trunk_mat = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.28, 0.18, 0.08),
-        perceptual_roughness: 0.97,
+    // Stone mine support pillars (replaces trees — guild has no trees)
+    let pillar_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.40, 0.36, 0.30),
+        perceptual_roughness: 0.93,
         ..default()
     });
-    let leaf_mat = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.10, 0.28, 0.08),
-        perceptual_roughness: 0.93,
+    let pillar_cap_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.34, 0.30, 0.24),
+        perceptual_roughness: 0.90,
+        ..default()
+    });
+    let beam_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.32, 0.20, 0.08),
+        perceptual_roughness: 0.95,
         ..default()
     });
     for &[tx, tz] in &[
@@ -481,25 +510,34 @@ fn spawn_world(
         [17.0, 8.0],
         [0.0, 15.0],
     ] {
-        let h = 1.3 + (tx * 0.4).sin().abs() * 0.5;
-        let r = 0.85 + (tz * 0.35).cos().abs() * 0.35;
+        let ph = 2.4_f32;
+        // Pillar shaft
         commands.spawn((
-            Mesh3d(meshes.add(Cylinder::new(0.17, h))),
-            MeshMaterial3d(trunk_mat.clone()),
-            Transform::from_xyz(tx, h / 2.0, tz),
+            Mesh3d(meshes.add(Cylinder::new(0.20, ph))),
+            MeshMaterial3d(pillar_mat.clone()),
+            Transform::from_xyz(tx, ph / 2.0, tz),
             Collider::Circle(0.45),
             GameEntity,
         ));
+        // Capital (top cap)
         commands.spawn((
-            Mesh3d(meshes.add(Sphere::new(r).mesh().uv(10, 7))),
-            MeshMaterial3d(leaf_mat.clone()),
-            Transform::from_xyz(tx, h + r * 0.6, tz),
+            Mesh3d(meshes.add(Cuboid::new(0.55, 0.18, 0.55))),
+            MeshMaterial3d(pillar_cap_mat.clone()),
+            Transform::from_xyz(tx, ph + 0.09, tz),
             GameEntity,
         ));
+        // Base
         commands.spawn((
-            Mesh3d(meshes.add(Sphere::new(r * 0.7).mesh().uv(8, 6))),
-            MeshMaterial3d(leaf_mat.clone()),
-            Transform::from_xyz(tx + r * 0.28, h + r * 1.0, tz - r * 0.2),
+            Mesh3d(meshes.add(Cuboid::new(0.50, 0.14, 0.50))),
+            MeshMaterial3d(pillar_cap_mat.clone()),
+            Transform::from_xyz(tx, 0.07, tz),
+            GameEntity,
+        ));
+        // Wooden horizontal support beam connecting to nearest wall direction
+        commands.spawn((
+            Mesh3d(meshes.add(Cuboid::new(0.10, 0.10, 1.0))),
+            MeshMaterial3d(beam_mat.clone()),
+            Transform::from_xyz(tx, ph - 0.3, tz),
             GameEntity,
         ));
     }
@@ -703,28 +741,29 @@ fn spawn_player(
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
 ) {
+    // OSRS default skin: bright yellow, brown hair, blue shirt, dark pants
     let skin = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.94, 0.80, 0.62),
-        perceptual_roughness: 0.80,
+        base_color: Color::srgb(1.0, 0.87, 0.42),
+        perceptual_roughness: 0.78,
         ..default()
     });
     let shirt = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.14, 0.32, 0.72),
+        base_color: Color::srgb(0.12, 0.30, 0.70),
         perceptual_roughness: 0.85,
         ..default()
     });
     let pants = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.22, 0.16, 0.10),
+        base_color: Color::srgb(0.20, 0.18, 0.14),
         perceptual_roughness: 0.90,
         ..default()
     });
     let boot = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.15, 0.10, 0.06),
+        base_color: Color::srgb(0.18, 0.12, 0.06),
         perceptual_roughness: 0.90,
         ..default()
     });
     let hair = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.35, 0.20, 0.08),
+        base_color: Color::srgb(0.26, 0.14, 0.04),
         perceptual_roughness: 0.90,
         ..default()
     });
@@ -963,6 +1002,33 @@ fn build_humanoid(
         .id();
     commands.entity(hd).set_parent(head);
     commands.entity(hr).set_parent(head);
+
+    // Face features on the +Z face (camera-facing at rest).
+    // Reuse `hair` handle for eye/mouth color — dark brown, close to OSRS look.
+    let eye_l = commands
+        .spawn((
+            Mesh3d(meshes.add(Cuboid::new(0.065, 0.065, 0.025))),
+            MeshMaterial3d(hair.clone()),
+            Transform::from_xyz(0.07, 0.03, 0.13),
+        ))
+        .id();
+    let eye_r = commands
+        .spawn((
+            Mesh3d(meshes.add(Cuboid::new(0.065, 0.065, 0.025))),
+            MeshMaterial3d(hair.clone()),
+            Transform::from_xyz(-0.07, 0.03, 0.13),
+        ))
+        .id();
+    let mouth = commands
+        .spawn((
+            Mesh3d(meshes.add(Cuboid::new(0.10, 0.030, 0.025))),
+            MeshMaterial3d(hair.clone()),
+            Transform::from_xyz(0.0, -0.07, 0.13),
+        ))
+        .id();
+    commands.entity(eye_l).set_parent(head);
+    commands.entity(eye_r).set_parent(head);
+    commands.entity(mouth).set_parent(head);
 
     // Torso
     let torso = commands
@@ -2453,8 +2519,8 @@ fn reset_game(
 
     // Re-run setup inline (same as setup but without Startup)
     commands.insert_resource(AmbientLight {
-        color: Color::srgb(0.7, 0.75, 0.9),
-        brightness: 280.0,
+        color: Color::srgb(0.55, 0.48, 0.38),
+        brightness: 180.0,
     });
     commands.spawn((
         Camera3d::default(),
@@ -2463,24 +2529,34 @@ fn reset_game(
     ));
     commands.spawn((
         DirectionalLight {
-            illuminance: 11_000.0,
+            illuminance: 6_000.0,
             shadows_enabled: true,
-            color: Color::srgb(1.0, 0.92, 0.78),
+            color: Color::srgb(0.88, 0.78, 0.62),
             ..default()
         },
         Transform::from_xyz(-8.0, 14.0, 3.0).looking_at(Vec3::ZERO, Vec3::Y),
         GameEntity,
     ));
-    commands.spawn((
-        PointLight {
-            intensity: 60_000.0,
-            color: Color::srgb(0.4, 0.55, 1.0),
-            range: 35.0,
-            ..default()
-        },
-        Transform::from_xyz(0.0, 12.0, -8.0),
-        GameEntity,
-    ));
+    for &[lx, lz] in &[
+        [-15.0f32, 3.0],
+        [15.0, 4.0],
+        [-9.0, -10.0],
+        [9.0, -10.0],
+        [0.0, -20.0],
+        [-6.0, 10.0],
+        [6.0, 11.0],
+    ] {
+        commands.spawn((
+            PointLight {
+                intensity: 14_000.0,
+                color: Color::srgb(1.0, 0.62, 0.18),
+                range: 14.0,
+                ..default()
+            },
+            Transform::from_xyz(lx, 2.5, lz),
+            GameEntity,
+        ));
+    }
 
     spawn_world(&mut commands, &mut meshes, &mut materials);
     spawn_player(&mut commands, &mut meshes, &mut materials);
