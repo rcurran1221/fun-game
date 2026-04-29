@@ -23,7 +23,7 @@ const BOUNDS_X: f32 = 21.0;
 const BOUNDS_Z_MIN: f32 = -25.0;
 const BOUNDS_Z_MAX: f32 = 19.0;
 const TILE_SIZE: f32 = 1.0;
-const CLICK_ENEMY_RADIUS: f32 = 0.9;
+const CLICK_ENEMY_RADIUS: f32 = 1.4;
 const CLICK_ROCK_RADIUS: f32 = 1.1;
 
 // ── Ore type ──────────────────────────────────────────────────
