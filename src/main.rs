@@ -1380,28 +1380,171 @@ fn push_out(pos: &mut Vec3, col_pos: Vec3, col: &Collider) {
 }
 
 fn fps_combat(
-    _mouse: Res<ButtonInput<MouseButton>>,
-    _phase: Res<GamePhase>,
-    _choice: Res<LoadoutChoice>,
-    _time: Res<Time>,
-    _player_q: Query<(&Transform, &mut WeaponCooldown), With<Player>>,
-    _arm_gtf_q: Query<&GlobalTransform, With<FpsCameraArm>>,
-    _enemy_q: Query<(Entity, &Transform, &Health), (With<Enemy>, Without<EnemyDying>)>,
-    _damage_events: EventWriter<DamageEvent>,
-    _commands: Commands,
-    _meshes: ResMut<Assets<Mesh>>,
-    _materials: ResMut<Assets<StandardMaterial>>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    phase: Res<GamePhase>,
+    choice: Res<LoadoutChoice>,
+    time: Res<Time>,
+    mut player_q: Query<(&Transform, &mut WeaponCooldown), With<Player>>,
+    arm_gtf_q: Query<&GlobalTransform, With<FpsCameraArm>>,
+    enemy_q: Query<(Entity, &Transform), (With<Enemy>, Without<EnemyDying>)>,
+    mut damage_events: EventWriter<DamageEvent>,
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
+    if *phase != GamePhase::Playing {
+        return;
+    }
+    let Ok((player_tf, mut cd)) = player_q.get_single_mut() else {
+        return;
+    };
+    cd.0 -= time.delta_secs();
+    if cd.0 > 0.0 {
+        return;
+    }
+    if !mouse.just_pressed(MouseButton::Left) {
+        return;
+    }
+
+    cd.0 = choice.weapon.cooldown();
+
+    let (dmg_min, dmg_max) = choice.weapon.dmg_range();
+    let mut dmg = dmg_min + (dmg_max - dmg_min) * rand_f32();
+    if choice.weapon == WeaponType::Magic {
+        dmg *= choice.armor.magic_bonus();
+    }
+
+    if choice.weapon.is_ranged() {
+        // Shoot a projectile from camera arm
+        let Ok(arm_gtf) = arm_gtf_q.get_single() else {
+            return;
+        };
+        let (_, rot, origin) = arm_gtf.to_scale_rotation_translation();
+        let fwd = rot * Vec3::NEG_Z;
+        let proj_color = choice.weapon.color();
+        let emissive = LinearRgba::new(
+            proj_color.to_linear().red * 3.0,
+            proj_color.to_linear().green * 3.0,
+            proj_color.to_linear().blue * 3.0,
+            1.0,
+        );
+        commands.spawn((
+            Mesh3d(meshes.add(Sphere::new(0.09).mesh().ico(1).unwrap())),
+            MeshMaterial3d(materials.add(StandardMaterial {
+                base_color: proj_color,
+                emissive,
+                ..default()
+            })),
+            Transform::from_translation(origin + fwd * 0.6),
+            Projectile {
+                vel: fwd * choice.weapon.proj_speed(),
+                damage: dmg,
+                aoe_radius: choice.weapon.aoe(),
+                lifetime: 3.0,
+            },
+            GameEntity,
+        ));
+    } else {
+        // Sword melee — hit any enemy within range and in front
+        let player_pos = player_tf.translation;
+        let player_fwd = {
+            let f = *player_tf.forward();
+            Vec3::new(f.x, 0.0, f.z).normalize_or_zero()
+        };
+        for (enemy_e, enemy_tf) in enemy_q.iter() {
+            let to_enemy = enemy_tf.translation - player_pos;
+            let dist = Vec2::new(to_enemy.x, to_enemy.z).length();
+            if dist > 2.5 {
+                continue;
+            }
+            // Must be roughly in front (dot > 0)
+            let flat = Vec2::new(to_enemy.x, to_enemy.z).normalize_or_zero();
+            let dot = flat.dot(Vec2::new(player_fwd.x, player_fwd.z));
+            if dot > -0.3 {
+                damage_events.send(DamageEvent {
+                    target: enemy_e,
+                    amount: dmg,
+                });
+            }
+        }
+    }
 }
 
 fn projectile_update(
-    _time: Res<Time>,
-    _phase: Res<GamePhase>,
-    _proj_q: Query<(Entity, &mut Transform, &mut Projectile)>,
-    _enemy_q: Query<(Entity, &GlobalTransform), (With<Enemy>, Without<EnemyDying>)>,
-    _damage_events: EventWriter<DamageEvent>,
-    _commands: Commands,
+    time: Res<Time>,
+    phase: Res<GamePhase>,
+    mut proj_q: Query<(Entity, &mut Transform, &mut Projectile)>,
+    enemy_q: Query<(Entity, &GlobalTransform), (With<Enemy>, Without<EnemyDying>)>,
+    mut damage_events: EventWriter<DamageEvent>,
+    mut commands: Commands,
 ) {
+    if *phase != GamePhase::Playing {
+        return;
+    }
+    let dt = time.delta_secs();
+
+    for (proj_e, mut proj_tf, mut proj) in proj_q.iter_mut() {
+        proj.lifetime -= dt;
+        if proj.lifetime <= 0.0 {
+            commands.entity(proj_e).despawn_recursive();
+            continue;
+        }
+        proj_tf.translation += proj.vel * dt;
+        proj_tf.translation.y = proj_tf.translation.y.max(0.08);
+
+        // Check hits against enemies
+        let mut hit = false;
+        for (enemy_e, enemy_gtf) in enemy_q.iter() {
+            let dist = (proj_tf.translation - enemy_gtf.translation()).length();
+            if dist < 0.65 + proj.aoe_radius {
+                damage_events.send(DamageEvent {
+                    target: enemy_e,
+                    amount: proj.damage,
+                });
+                hit = true;
+                // AoE: also damage nearby enemies
+                if proj.aoe_radius > 0.0 {
+                    for (other_e, other_gtf) in enemy_q.iter() {
+                        if other_e == enemy_e {
+                            continue;
+                        }
+                        let d2 = (proj_tf.translation - other_gtf.translation()).length();
+                        if d2 < proj.aoe_radius {
+                            damage_events.send(DamageEvent {
+                                target: other_e,
+                                amount: proj.damage * 0.6,
+                            });
+                        }
+                    }
+                }
+                break;
+            }
+        }
+        if hit {
+            commands.entity(proj_e).despawn_recursive();
+        }
+    }
+}
+
+fn apply_damage(
+    mut events: EventReader<DamageEvent>,
+    mut hp_q: Query<&mut Health>,
+    player_q: Query<Entity, With<Player>>,
+    mut flash_q: Query<&mut DamageFlash>,
+) {
+    for ev in events.read() {
+        if let Ok(mut hp) = hp_q.get_mut(ev.target) {
+            hp.cur -= ev.amount;
+            // If target is player, trigger red flash
+            if let Ok(player_e) = player_q.get_single() {
+                if ev.target == player_e {
+                    for mut flash in flash_q.iter_mut() {
+                        flash.timer = FLASH_DURATION;
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn ai_update(
@@ -1413,14 +1556,6 @@ fn ai_update(
         (Without<Player>, Without<EnemyDying>),
     >,
     _damage_events: EventWriter<DamageEvent>,
-) {
-}
-
-fn apply_damage(
-    mut _events: EventReader<DamageEvent>,
-    mut _hp_q: Query<&mut Health>,
-    _player_q: Query<Entity, With<Player>>,
-    _flash_q: Query<&mut DamageFlash>,
 ) {
 }
 
