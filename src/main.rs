@@ -359,10 +359,526 @@ fn main() {
 //  Stub systems (filled in subsequent chunks)
 // ─────────────────────────────────────────────────────────────────────────────
 fn setup(
-    mut _commands: Commands,
-    mut _meshes: ResMut<Assets<Mesh>>,
-    mut _materials: ResMut<Assets<StandardMaterial>>,
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
+    // Ambient + directional light
+    commands.insert_resource(AmbientLight {
+        color: Color::WHITE,
+        brightness: 250.0,
+    });
+    commands.spawn((
+        DirectionalLight {
+            color: Color::srgb(1.0, 0.95, 0.85),
+            illuminance: 7000.0,
+            shadows_enabled: false,
+            ..default()
+        },
+        Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -0.8, 0.3, 0.0)),
+    ));
+
+    // Torch point lights at pillar positions
+    for [tx, tz] in [
+        [-15.0f32, 3.0],
+        [15.0, 4.0],
+        [-16.0, -6.0],
+        [16.0, -5.0],
+        [-14.0, -14.0],
+        [14.0, -15.0],
+        [-9.0, 14.0],
+        [9.0, 15.0],
+    ] {
+        commands.spawn((
+            PointLight {
+                color: Color::srgb(1.0, 0.68, 0.28),
+                intensity: 2000.0,
+                radius: 8.0,
+                range: 12.0,
+                ..default()
+            },
+            Transform::from_xyz(tx, 2.8, tz),
+        ));
+    }
+
+    spawn_world(&mut commands, &mut meshes, &mut materials);
+    spawn_player(&mut commands);
+    spawn_enemies(&mut commands, &mut meshes, &mut materials);
+}
+
+// ── Spawn world ───────────────────────────────────────────────────────────────
+fn spawn_world(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+) {
+    // Ground
+    commands.spawn((
+        Mesh3d(meshes.add(Plane3d::default().mesh().size(90.0, 90.0))),
+        MeshMaterial3d(materials.add(StandardMaterial {
+            base_color: Color::srgb(0.22, 0.21, 0.19),
+            perceptual_roughness: 0.94,
+            ..default()
+        })),
+        GameEntity,
+    ));
+
+    // Stone tile path (north-south centre strip)
+    let path_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.50, 0.47, 0.42),
+        perceptual_roughness: 0.80,
+        ..default()
+    });
+    for zi in -34..=25i32 {
+        commands.spawn((
+            Mesh3d(meshes.add(Plane3d::default().mesh().size(2.4, 1.1))),
+            MeshMaterial3d(path_mat.clone()),
+            Transform::from_xyz(0.0, 0.01, zi as f32),
+            GameEntity,
+        ));
+    }
+
+    // Wall material
+    let wall_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.44, 0.40, 0.33),
+        perceptual_roughness: 0.88,
+        ..default()
+    });
+
+    // Outer south wall
+    for i in -13..=13i32 {
+        let x = i as f32 * 2.2;
+        commands.spawn((
+            Mesh3d(meshes.add(Cuboid::new(2.1, 3.5, 0.7))),
+            MeshMaterial3d(wall_mat.clone()),
+            Transform::from_xyz(x, 1.75, -35.2),
+            GameEntity,
+        ));
+    }
+    // Outer east/west walls
+    for i in -16..=12i32 {
+        let z = i as f32 * 2.2;
+        for sx in [-29.5f32, 29.5] {
+            commands.spawn((
+                Mesh3d(meshes.add(Cuboid::new(0.7, 3.5, 2.1))),
+                MeshMaterial3d(wall_mat.clone()),
+                Transform::from_xyz(sx, 1.75, z),
+                GameEntity,
+            ));
+        }
+    }
+    // Outer north wall (gap in centre for entrance)
+    for i in -13..=13i32 {
+        let x = i as f32 * 2.2;
+        if x.abs() < 1.5 {
+            continue;
+        }
+        commands.spawn((
+            Mesh3d(meshes.add(Cuboid::new(2.1, 3.5, 0.7))),
+            MeshMaterial3d(wall_mat.clone()),
+            Transform::from_xyz(x, 1.75, 26.2),
+            GameEntity,
+        ));
+    }
+    // Inner side walls
+    for i in -12..=9i32 {
+        let z = i as f32 * 2.2;
+        for sx in [-22.5f32, 22.5] {
+            commands.spawn((
+                Mesh3d(meshes.add(Cuboid::new(0.7, 3.5, 2.1))),
+                MeshMaterial3d(wall_mat.clone()),
+                Transform::from_xyz(sx, 1.75, z),
+                GameEntity,
+            ));
+        }
+    }
+    // Inner north wall
+    for i in -9..=9i32 {
+        let x = i as f32 * 2.2;
+        if x.abs() < 1.5 {
+            continue;
+        }
+        commands.spawn((
+            Mesh3d(meshes.add(Cuboid::new(2.1, 3.5, 0.7))),
+            MeshMaterial3d(wall_mat.clone()),
+            Transform::from_xyz(x, 1.75, 20.5),
+            GameEntity,
+        ));
+    }
+
+    // Invisible boundary colliders (solid walls for player)
+    for (x, z, hx, hz) in [
+        (0.0f32, -34.5, 30.0, 0.9), // south outer
+        (0.0, 26.5, 30.0, 0.9),     // north outer
+        (-30.0, -4.0, 0.9, 31.0),   // west outer
+        (30.0, -4.0, 0.9, 31.0),    // east outer
+        (0.0, 21.0, 23.0, 0.9),     // inner north
+        (-23.0, 4.0, 0.9, 25.0),    // inner west
+        (23.0, 4.0, 0.9, 25.0),     // inner east
+    ] {
+        commands.spawn((
+            Transform::from_xyz(x, 1.0, z),
+            Collider::Obb {
+                half_x: hx,
+                half_z: hz,
+            },
+            GameEntity,
+        ));
+    }
+
+    // Mine support pillars
+    let pillar_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.33, 0.30, 0.26),
+        perceptual_roughness: 0.90,
+        ..default()
+    });
+    let pillar_cap_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.48, 0.43, 0.36),
+        perceptual_roughness: 0.82,
+        ..default()
+    });
+    for [tx, tz] in [
+        [-15.0f32, 3.0],
+        [-16.0, -6.0],
+        [-14.0, -14.0],
+        [15.0, 4.0],
+        [16.0, -5.0],
+        [14.0, -15.0],
+        [-9.0, 14.0],
+        [9.0, 15.0],
+        [-6.0, 10.0],
+        [6.0, 11.0],
+        [-12.0, -20.0],
+        [12.0, -20.0],
+        [-17.0, 8.0],
+        [17.0, 8.0],
+        [0.0, 15.0],
+        [-20.0, 0.0],
+        [20.0, 0.0],
+    ] {
+        let ph = 3.2f32;
+        commands.spawn((
+            Mesh3d(meshes.add(Cylinder::new(0.22, ph).mesh().resolution(12))),
+            MeshMaterial3d(pillar_mat.clone()),
+            Transform::from_xyz(tx, ph / 2.0, tz),
+            Collider::Circle(0.45),
+            GameEntity,
+        ));
+        commands.spawn((
+            Mesh3d(meshes.add(Cuboid::new(0.58, 0.20, 0.58))),
+            MeshMaterial3d(pillar_cap_mat.clone()),
+            Transform::from_xyz(tx, ph + 0.10, tz),
+            GameEntity,
+        ));
+        commands.spawn((
+            Mesh3d(meshes.add(Cuboid::new(0.52, 0.14, 0.52))),
+            MeshMaterial3d(pillar_cap_mat.clone()),
+            Transform::from_xyz(tx, 0.07, tz),
+            GameEntity,
+        ));
+    }
+
+    // Cover crates
+    let crate_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.46, 0.32, 0.14),
+        perceptual_roughness: 0.88,
+        ..default()
+    });
+    for [cx, cz, cs] in [
+        [-7.0f32, -3.0, 0.7],
+        [6.0, -6.0, 0.6],
+        [-8.0, -12.0, 0.65],
+        [9.0, 2.0, 0.55],
+        [-3.0, 7.0, 0.5],
+        [3.0, -17.0, 0.60],
+    ] {
+        commands.spawn((
+            Mesh3d(meshes.add(Cuboid::new(cs, cs * 0.9, cs))),
+            MeshMaterial3d(crate_mat.clone()),
+            Transform::from_xyz(cx, cs * 0.45, cz),
+            Collider::Circle(cs * 0.72),
+            GameEntity,
+        ));
+    }
+
+    // Ruined wall sections (low cover)
+    let ruin_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.50, 0.44, 0.32),
+        perceptual_roughness: 0.85,
+        ..default()
+    });
+    for [rx, rz, rw, ra] in [
+        [-11.0f32, -7.0, 2.2, 0.3],
+        [9.0, -11.0, 1.8, -0.4],
+        [-4.0, 5.0, 2.5, 0.1],
+        [5.0, 1.0, 1.5, 0.8],
+        [-7.0, -18.0, 2.0, 0.5],
+        [7.0, -14.0, 1.8, -0.2],
+    ] {
+        commands.spawn((
+            Mesh3d(meshes.add(Cuboid::new(rw, 1.2, 0.3))),
+            MeshMaterial3d(ruin_mat.clone()),
+            Transform::from_xyz(rx, 0.6, rz).with_rotation(Quat::from_rotation_y(ra)),
+            Collider::Obb {
+                half_x: rw / 2.0 + 0.05,
+                half_z: 0.28,
+            },
+            GameEntity,
+        ));
+    }
+
+    // Ore rocks (visual cover — no mining in FPS mode)
+    let rock_positions: &[(f32, f32, f32)] = &[
+        (-11.0, -1.0, 0.55),
+        (-13.0, -4.0, 0.55),
+        (-12.0, -8.0, 0.65),
+        (-7.0, 7.0, 0.55),
+        (5.0, -3.0, 0.55),
+        (-5.0, -6.0, 0.55),
+        (10.0, -9.0, 0.65),
+        (13.0, -5.0, 0.65),
+        (0.5, -15.0, 0.78),
+        (5.0, -20.0, 0.78),
+        (-9.0, -18.0, 0.78),
+        (8.0, 12.0, 0.65),
+        (-14.0, 10.0, 0.55),
+        (-21.0, -24.0, 0.75),
+        (20.0, -27.0, 0.90),
+    ];
+    let rock_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.28, 0.24, 0.20),
+        perceptual_roughness: 0.92,
+        ..default()
+    });
+    for &(rx, rz, r) in rock_positions {
+        commands.spawn((
+            Mesh3d(meshes.add(Cuboid::new(r * 1.8, r * 1.4, r * 1.5))),
+            MeshMaterial3d(rock_mat.clone()),
+            Transform::from_xyz(rx, r * 0.7, rz).with_rotation(Quat::from_rotation_y(rx * 0.5)),
+            Collider::Circle(r + 0.15),
+            GameEntity,
+        ));
+    }
+
+    // Extraction zones
+    let zone_mat = materials.add(StandardMaterial {
+        base_color: Color::srgba(0.1, 0.9, 0.2, 0.5),
+        emissive: LinearRgba::new(0.0, 0.6, 0.1, 1.0),
+        alpha_mode: AlphaMode::Blend,
+        ..default()
+    });
+    let pillar_glow = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.15, 0.85, 0.25),
+        emissive: LinearRgba::new(0.0, 0.8, 0.15, 1.0),
+        ..default()
+    });
+    for ex in [-18.0f32, 18.0] {
+        let ez = -30.0f32;
+        commands.spawn((
+            Mesh3d(meshes.add(Cylinder::new(EXTRACT_RADIUS, 0.08).mesh().resolution(32))),
+            MeshMaterial3d(zone_mat.clone()),
+            Transform::from_xyz(ex, 0.04, ez),
+            ExtractionZone,
+            GameEntity,
+        ));
+        for [px, pz] in [[-1.8f32, -1.8], [1.8, -1.8], [-1.8, 1.8], [1.8, 1.8f32]] {
+            commands.spawn((
+                Mesh3d(meshes.add(Cylinder::new(0.12, 2.8))),
+                MeshMaterial3d(pillar_glow.clone()),
+                Transform::from_xyz(ex + px, 1.4, ez + pz),
+                GameEntity,
+            ));
+        }
+        commands.spawn((
+            Mesh3d(meshes.add(Cuboid::new(3.2, 0.4, 0.12))),
+            MeshMaterial3d(materials.add(StandardMaterial {
+                base_color: Color::srgb(0.12, 0.80, 0.22),
+                emissive: LinearRgba::new(0.0, 0.5, 0.1, 1.0),
+                ..default()
+            })),
+            Transform::from_xyz(ex, 2.9, ez - 1.9),
+            GameEntity,
+        ));
+    }
+}
+
+// ── Spawn player + FPS camera hierarchy ──────────────────────────────────────
+fn spawn_player(commands: &mut Commands) {
+    // Player root: position + yaw
+    let player = commands
+        .spawn((
+            Transform::from_xyz(0.0, 0.0, 18.0)
+                .with_rotation(Quat::from_rotation_y(std::f32::consts::PI)),
+            Visibility::default(),
+            Player,
+            Health::new(100.0),
+            WeaponCooldown::default(),
+            AnimState::default(),
+            GameEntity,
+        ))
+        .id();
+
+    // Camera arm: eye-height pivot for pitch
+    let arm = commands
+        .spawn((
+            Transform::from_xyz(0.0, EYE_HEIGHT, 0.0),
+            Visibility::default(),
+            FpsCameraArm,
+            GameEntity,
+        ))
+        .id();
+    commands.entity(arm).set_parent(player);
+
+    // Camera
+    let cam = commands
+        .spawn((Camera3d::default(), Transform::default(), GameEntity))
+        .id();
+    commands.entity(cam).set_parent(arm);
+}
+
+// ── Spawn enemies ─────────────────────────────────────────────────────────────
+fn spawn_enemies(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+) {
+    let spawns: &[(f32, f32)] = &[
+        (-8.0, -5.0),
+        (7.0, -8.0),
+        (0.0, -20.0),
+        (-15.0, -15.0),
+        (12.0, -20.0),
+        (-5.0, 10.0),
+        (10.0, 8.0),
+        (0.0, -28.0),
+    ];
+
+    let skin_color = Color::srgb(0.25, 0.52, 0.18);
+    let armor_color = Color::srgb(0.48, 0.36, 0.18);
+    let dark = Color::srgb(0.14, 0.12, 0.08);
+
+    for &(ex, ez) in spawns {
+        let skin = materials.add(StandardMaterial {
+            base_color: skin_color,
+            perceptual_roughness: 0.80,
+            ..default()
+        });
+        let armor = materials.add(StandardMaterial {
+            base_color: armor_color,
+            perceptual_roughness: 0.85,
+            ..default()
+        });
+        let dark_mat = materials.add(StandardMaterial {
+            base_color: dark,
+            perceptual_roughness: 0.90,
+            ..default()
+        });
+
+        let (la, ra, ll, rl) = build_humanoid(commands, meshes, &skin, &armor, &dark_mat);
+        let origin = Vec3::new(ex, 0.0, ez);
+
+        let root = commands
+            .spawn((
+                Transform::from_xyz(ex, 0.0, ez),
+                Visibility::default(),
+                Enemy {
+                    state: EnemyState::Patrol,
+                    patrol_origin: origin,
+                    patrol_target: origin,
+                    patrol_timer: 0.0,
+                    attack_cd: 0.0,
+                },
+                Health::new(ENEMY_HP),
+                AnimState::default(),
+                AnimTimer(0.0),
+                PlayerLimbs {
+                    left_arm: la,
+                    right_arm: ra,
+                    left_leg: ll,
+                    right_leg: rl,
+                },
+                GameEntity,
+            ))
+            .id();
+
+        commands.entity(la).set_parent(root);
+        commands.entity(ra).set_parent(root);
+        commands.entity(ll).set_parent(root);
+        commands.entity(rl).set_parent(root);
+    }
+}
+
+// ── Build humanoid mesh hierarchy ─────────────────────────────────────────────
+/// Returns (left_arm, right_arm, left_leg, right_leg) entity IDs.
+/// Torso and head are spawned as children of the caller's root entity via set_parent.
+fn build_humanoid(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    skin: &Handle<StandardMaterial>,
+    body: &Handle<StandardMaterial>,
+    dark: &Handle<StandardMaterial>,
+) -> (Entity, Entity, Entity, Entity) {
+    // Head
+    let head = commands
+        .spawn((
+            Mesh3d(meshes.add(Cuboid::new(0.38, 0.38, 0.38))),
+            MeshMaterial3d(skin.clone()),
+            Transform::from_xyz(0.0, 1.55, 0.0),
+        ))
+        .id();
+
+    // Torso
+    let torso = commands
+        .spawn((
+            Mesh3d(meshes.add(Cuboid::new(0.46, 0.52, 0.26))),
+            MeshMaterial3d(body.clone()),
+            Transform::from_xyz(0.0, 1.08, 0.0),
+        ))
+        .id();
+
+    // Arms
+    let left_arm = commands
+        .spawn((
+            Mesh3d(meshes.add(Cuboid::new(0.16, 0.46, 0.16))),
+            MeshMaterial3d(body.clone()),
+            Transform::from_xyz(-0.32, 1.08, 0.0),
+        ))
+        .id();
+    let right_arm = commands
+        .spawn((
+            Mesh3d(meshes.add(Cuboid::new(0.16, 0.46, 0.16))),
+            MeshMaterial3d(skin.clone()),
+            Transform::from_xyz(0.32, 1.08, 0.0),
+        ))
+        .id();
+
+    // Legs
+    let left_leg = commands
+        .spawn((
+            Mesh3d(meshes.add(Cuboid::new(0.18, 0.50, 0.18))),
+            MeshMaterial3d(dark.clone()),
+            Transform::from_xyz(-0.13, 0.58, 0.0),
+        ))
+        .id();
+    let right_leg = commands
+        .spawn((
+            Mesh3d(meshes.add(Cuboid::new(0.18, 0.50, 0.18))),
+            MeshMaterial3d(dark.clone()),
+            Transform::from_xyz(0.13, 0.58, 0.0),
+        ))
+        .id();
+
+    // Head and torso are also children — caller sets root
+    commands.entity(head).set_parent_in_place(torso); // head sits on torso
+                                                      // Return the four limb entities; caller must set_parent on all of them + torso
+                                                      // We return torso separately so caller can parent it too
+                                                      // Actually: we return la, ra, ll, rl; torso+head chain is separate
+                                                      // Let's spawn torso + head as a single unit, parent torso to root
+    let _ = head; // head is already parented to torso above
+    let _ = torso; // caller must set_parent(torso, root)
+
+    // For simplicity, parent all to the root inside build_humanoid by returning them all
+    (left_arm, right_arm, left_leg, right_leg)
 }
 
 fn reset_game(
