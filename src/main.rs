@@ -925,24 +925,121 @@ fn confirm_loadout(
 ) {
 }
 
-fn cursor_management(_phase: Res<GamePhase>, _windows: Query<&mut Window>) {}
+fn cursor_management(phase: Res<GamePhase>, mut windows: Query<&mut Window>) {
+    let Ok(mut win) = windows.get_single_mut() else {
+        return;
+    };
+    match *phase {
+        GamePhase::Playing => {
+            win.cursor_options.grab_mode = CursorGrabMode::Locked;
+            win.cursor_options.visible = false;
+        }
+        _ => {
+            win.cursor_options.grab_mode = CursorGrabMode::None;
+            win.cursor_options.visible = true;
+        }
+    }
+}
 
 fn fps_look(
-    _mouse_motion: EventReader<MouseMotion>,
-    mut _look: ResMut<PlayerLook>,
-    _phase: Res<GamePhase>,
-    _player_q: Query<&mut Transform, (With<Player>, Without<FpsCameraArm>)>,
-    _arm_q: Query<&mut Transform, (With<FpsCameraArm>, Without<Player>)>,
+    mut mouse_motion: EventReader<MouseMotion>,
+    mut look: ResMut<PlayerLook>,
+    phase: Res<GamePhase>,
+    mut player_q: Query<&mut Transform, (With<Player>, Without<FpsCameraArm>)>,
+    mut arm_q: Query<&mut Transform, (With<FpsCameraArm>, Without<Player>)>,
 ) {
+    if *phase != GamePhase::Playing {
+        mouse_motion.clear();
+        return;
+    }
+    for ev in mouse_motion.read() {
+        look.yaw -= ev.delta.x * MOUSE_SENS;
+        look.pitch = (look.pitch - ev.delta.y * MOUSE_SENS).clamp(-1.48, 1.48);
+    }
+    if let Ok(mut tf) = player_q.get_single_mut() {
+        tf.rotation = Quat::from_rotation_y(look.yaw);
+    }
+    if let Ok(mut tf) = arm_q.get_single_mut() {
+        tf.rotation = Quat::from_rotation_x(look.pitch);
+    }
 }
 
 fn fps_movement(
-    _keys: Res<ButtonInput<KeyCode>>,
-    _time: Res<Time>,
-    _phase: Res<GamePhase>,
-    _player_q: Query<&mut Transform, (With<Player>, Without<FpsCameraArm>, Without<Enemy>)>,
-    _collider_q: Query<(&Transform, &Collider), (Without<Player>, Without<Enemy>)>,
+    keys: Res<ButtonInput<KeyCode>>,
+    time: Res<Time>,
+    phase: Res<GamePhase>,
+    mut player_q: Query<&mut Transform, (With<Player>, Without<FpsCameraArm>, Without<Enemy>)>,
+    collider_q: Query<(&Transform, &Collider), (Without<Player>, Without<Enemy>)>,
 ) {
+    if *phase != GamePhase::Playing {
+        return;
+    }
+    let dt = time.delta_secs();
+    let Ok(mut tf) = player_q.get_single_mut() else {
+        return;
+    };
+
+    let fwd = {
+        let f = *tf.forward();
+        Vec3::new(f.x, 0.0, f.z).normalize_or_zero()
+    };
+    let right = {
+        let r = *tf.right();
+        Vec3::new(r.x, 0.0, r.z).normalize_or_zero()
+    };
+
+    let mut dir = Vec3::ZERO;
+    if keys.pressed(KeyCode::KeyW) {
+        dir += fwd;
+    }
+    if keys.pressed(KeyCode::KeyS) {
+        dir -= fwd;
+    }
+    if keys.pressed(KeyCode::KeyA) {
+        dir -= right;
+    }
+    if keys.pressed(KeyCode::KeyD) {
+        dir += right;
+    }
+
+    tf.translation += dir.normalize_or_zero() * PLAYER_SPEED * dt;
+    tf.translation.y = 0.0;
+    tf.translation.x = tf.translation.x.clamp(-BOUNDS_X, BOUNDS_X);
+    tf.translation.z = tf.translation.z.clamp(BOUNDS_Z_MIN, BOUNDS_Z_MAX);
+
+    let pos = tf.translation;
+    for (ctf, col) in collider_q.iter() {
+        push_out(&mut tf.translation, ctf.translation, col);
+    }
+    let _ = pos;
+}
+
+fn push_out(pos: &mut Vec3, col_pos: Vec3, col: &Collider) {
+    match *col {
+        Collider::Circle(r) => {
+            let diff = Vec2::new(pos.x - col_pos.x, pos.z - col_pos.z);
+            let dist = diff.length();
+            let min_d = r + PLAYER_RADIUS;
+            if dist < min_d && dist > 1e-4 {
+                let push = diff.normalize() * (min_d - dist);
+                pos.x += push.x;
+                pos.z += push.y;
+            }
+        }
+        Collider::Obb { half_x, half_z } => {
+            let dx = pos.x - col_pos.x;
+            let dz = pos.z - col_pos.z;
+            let ox = (half_x + PLAYER_RADIUS) - dx.abs();
+            let oz = (half_z + PLAYER_RADIUS) - dz.abs();
+            if ox > 0.0 && oz > 0.0 {
+                if ox < oz {
+                    pos.x += ox * dx.signum();
+                } else {
+                    pos.z += oz * dz.signum();
+                }
+            }
+        }
+    }
 }
 
 fn fps_combat(
