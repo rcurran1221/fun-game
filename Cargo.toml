@@ -4,11 +4,16 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-bevy = "0.15"
+bevy = { version = "0.15", features = ["dynamic_linking"] }
 
-# Enable fast compilation
+# Dev: compile your code fast; let deps stay optimised
 [profile.dev]
 opt-level = 1
 
 [profile.dev.package."*"]
 opt-level = 3
+
+# Release: faster compile than the default while still being fast to run
+[profile.release]
+codegen-units = 4      # default 1 — more parallelism, marginal runtime cost
+lto = "thin"           # faster than "fat" LTO, still catches big wins

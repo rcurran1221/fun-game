@@ -776,7 +776,7 @@ fn spawn_enemies(
             ..default()
         });
 
-        let (la, ra, ll, rl) = build_humanoid(commands, meshes, &skin, &armor, &dark_mat);
+        let (torso, la, ra, ll, rl) = build_humanoid(commands, meshes, &skin, &armor, &dark_mat);
         let origin = Vec3::new(ex, 0.0, ez);
 
         let root = commands
@@ -803,6 +803,7 @@ fn spawn_enemies(
             ))
             .id();
 
+        commands.entity(torso).set_parent(root);
         commands.entity(la).set_parent(root);
         commands.entity(ra).set_parent(root);
         commands.entity(ll).set_parent(root);
@@ -811,32 +812,35 @@ fn spawn_enemies(
 }
 
 // ── Build humanoid mesh hierarchy ─────────────────────────────────────────────
-/// Returns (left_arm, right_arm, left_leg, right_leg) entity IDs.
-/// Torso and head are spawned as children of the caller's root entity via set_parent.
+/// Returns (torso, left_arm, right_arm, left_leg, right_leg) entity IDs.
+/// Caller must set_parent all five onto the enemy root.
 fn build_humanoid(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     skin: &Handle<StandardMaterial>,
     body: &Handle<StandardMaterial>,
     dark: &Handle<StandardMaterial>,
-) -> (Entity, Entity, Entity, Entity) {
-    // Head
-    let head = commands
-        .spawn((
-            Mesh3d(meshes.add(Cuboid::new(0.38, 0.38, 0.38))),
-            MeshMaterial3d(skin.clone()),
-            Transform::from_xyz(0.0, 1.55, 0.0),
-        ))
-        .id();
-
+) -> (Entity, Entity, Entity, Entity, Entity) {
     // Torso
     let torso = commands
         .spawn((
             Mesh3d(meshes.add(Cuboid::new(0.46, 0.52, 0.26))),
             MeshMaterial3d(body.clone()),
             Transform::from_xyz(0.0, 1.08, 0.0),
+            Visibility::default(),
         ))
         .id();
+
+    // Head — local to torso
+    let head = commands
+        .spawn((
+            Mesh3d(meshes.add(Cuboid::new(0.38, 0.38, 0.38))),
+            MeshMaterial3d(skin.clone()),
+            Transform::from_xyz(0.0, 0.45, 0.0),
+            Visibility::default(),
+        ))
+        .id();
+    commands.entity(head).set_parent(torso);
 
     // Arms
     let left_arm = commands
@@ -844,6 +848,7 @@ fn build_humanoid(
             Mesh3d(meshes.add(Cuboid::new(0.16, 0.46, 0.16))),
             MeshMaterial3d(body.clone()),
             Transform::from_xyz(-0.32, 1.08, 0.0),
+            Visibility::default(),
         ))
         .id();
     let right_arm = commands
@@ -851,6 +856,7 @@ fn build_humanoid(
             Mesh3d(meshes.add(Cuboid::new(0.16, 0.46, 0.16))),
             MeshMaterial3d(skin.clone()),
             Transform::from_xyz(0.32, 1.08, 0.0),
+            Visibility::default(),
         ))
         .id();
 
@@ -859,28 +865,20 @@ fn build_humanoid(
         .spawn((
             Mesh3d(meshes.add(Cuboid::new(0.18, 0.50, 0.18))),
             MeshMaterial3d(dark.clone()),
-            Transform::from_xyz(-0.13, 0.58, 0.0),
+            Transform::from_xyz(-0.13, 0.25, 0.0),
+            Visibility::default(),
         ))
         .id();
     let right_leg = commands
         .spawn((
             Mesh3d(meshes.add(Cuboid::new(0.18, 0.50, 0.18))),
             MeshMaterial3d(dark.clone()),
-            Transform::from_xyz(0.13, 0.58, 0.0),
+            Transform::from_xyz(0.13, 0.25, 0.0),
+            Visibility::default(),
         ))
         .id();
 
-    // Head and torso are also children — caller sets root
-    commands.entity(head).set_parent_in_place(torso); // head sits on torso
-                                                      // Return the four limb entities; caller must set_parent on all of them + torso
-                                                      // We return torso separately so caller can parent it too
-                                                      // Actually: we return la, ra, ll, rl; torso+head chain is separate
-                                                      // Let's spawn torso + head as a single unit, parent torso to root
-    let _ = head; // head is already parented to torso above
-    let _ = torso; // caller must set_parent(torso, root)
-
-    // For simplicity, parent all to the root inside build_humanoid by returning them all
-    (left_arm, right_arm, left_leg, right_leg)
+    (torso, left_arm, right_arm, left_leg, right_leg)
 }
 
 fn spawn_hud(commands: &mut Commands) {
@@ -1001,6 +999,39 @@ fn spawn_hud(commands: &mut Commands) {
         HudWeaponText,
         GameEntity,
     ));
+
+    // Controls panel (top-left)
+    commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Px(20.0),
+                top: Val::Px(20.0),
+                display: Display::Flex,
+                flex_direction: FlexDirection::Column,
+                row_gap: Val::Px(2.0),
+                ..default()
+            },
+            GameEntity,
+        ))
+        .with_children(|parent| {
+            for line in [
+                "WASD       Move",
+                "Mouse      Look",
+                "LMB        Attack",
+                "Walk green  Extract",
+                "ESC        Quit",
+            ] {
+                parent.spawn((
+                    Text::new(line),
+                    TextFont {
+                        font_size: 13.0,
+                        ..default()
+                    },
+                    TextColor(Color::srgba(0.85, 0.85, 0.85, 0.65)),
+                ));
+            }
+        });
 
     // Kill count (top-right)
     commands.spawn((
@@ -1693,7 +1724,7 @@ fn fps_combat(
             // Must be roughly in front (dot > 0)
             let flat = Vec2::new(to_enemy.x, to_enemy.z).normalize_or_zero();
             let dot = flat.dot(Vec2::new(player_fwd.x, player_fwd.z));
-            if dot > -0.3 {
+            if dot > 0.25 {
                 damage_events.send(DamageEvent {
                     target: enemy_e,
                     amount: dmg,

@@ -1,2 +1,6 @@
 [env]
 LIBGL_ALWAYS_SOFTWARE = "1"
+
+# Fast linker for Windows builds (rust-lld ships with the MSVC toolchain)
+[target.x86_64-pc-windows-msvc]
+linker = "rust-lld.exe"
