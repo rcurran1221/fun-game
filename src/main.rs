@@ -1548,32 +1548,137 @@ fn apply_damage(
 }
 
 fn ai_update(
-    _time: Res<Time>,
-    _phase: Res<GamePhase>,
-    _player_q: Query<(Entity, &Transform, &Health), (With<Player>, Without<Enemy>)>,
-    _enemy_q: Query<
+    time: Res<Time>,
+    phase: Res<GamePhase>,
+    player_q: Query<(Entity, &Transform, &Health), (With<Player>, Without<Enemy>)>,
+    mut enemy_q: Query<
         (Entity, &mut Transform, &mut Enemy, &mut AnimState),
         (Without<Player>, Without<EnemyDying>),
     >,
-    _damage_events: EventWriter<DamageEvent>,
+    mut damage_events: EventWriter<DamageEvent>,
 ) {
+    if *phase != GamePhase::Playing {
+        return;
+    }
+    let dt = time.delta_secs();
+    let Ok((player_e, player_tf, player_hp)) = player_q.get_single() else {
+        return;
+    };
+    if player_hp.cur <= 0.0 {
+        return;
+    }
+
+    for (_enemy_e, mut etf, mut enemy, mut anim) in enemy_q.iter_mut() {
+        let to_player = player_tf.translation - etf.translation;
+        let dist_xz = Vec2::new(to_player.x, to_player.z).length();
+
+        match enemy.state {
+            EnemyState::Patrol => {
+                if dist_xz < ENEMY_DETECT {
+                    enemy.state = EnemyState::Chase;
+                    continue;
+                }
+                // Wander toward patrol_target
+                enemy.patrol_timer -= dt;
+                if enemy.patrol_timer <= 0.0 {
+                    enemy.patrol_timer = 2.0 + rand_f32() * 2.5;
+                    let angle = rand_f32() * std::f32::consts::TAU;
+                    let radius = rand_f32() * 4.0;
+                    enemy.patrol_target = enemy.patrol_origin
+                        + Vec3::new(angle.cos() * radius, 0.0, angle.sin() * radius);
+                }
+                let to_t = enemy.patrol_target - etf.translation;
+                let d = Vec2::new(to_t.x, to_t.z).length();
+                if d > 0.4 {
+                    let dir = Vec3::new(to_t.x, 0.0, to_t.z).normalize_or_zero();
+                    etf.translation += dir * (ENEMY_SPEED * 0.5) * dt;
+                    etf.translation.y = 0.0;
+                    etf.look_to(dir, Vec3::Y);
+                    *anim = AnimState::Walking;
+                } else {
+                    *anim = AnimState::Idle;
+                }
+            }
+            EnemyState::Chase => {
+                if dist_xz > ENEMY_LOSE {
+                    enemy.state = EnemyState::Patrol;
+                    continue;
+                }
+                if dist_xz > ENEMY_MELEE_RANGE {
+                    let dir = Vec3::new(to_player.x, 0.0, to_player.z).normalize_or_zero();
+                    etf.translation += dir * ENEMY_SPEED * dt;
+                    etf.translation.y = 0.0;
+                    etf.look_to(dir, Vec3::Y);
+                    *anim = AnimState::Walking;
+                } else {
+                    *anim = AnimState::Idle;
+                    enemy.attack_cd -= dt;
+                    if enemy.attack_cd <= 0.0 {
+                        enemy.attack_cd = ENEMY_ATK_CD;
+                        damage_events.send(DamageEvent {
+                            target: player_e,
+                            amount: ENEMY_DMG * (0.7 + rand_f32() * 0.6),
+                        });
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn check_deaths(
-    _commands: Commands,
-    mut _phase: ResMut<GamePhase>,
-    _player_q: Query<&Health, With<Player>>,
-    _enemy_q: Query<(Entity, &Health), (With<Enemy>, Without<EnemyDying>)>,
-    mut _kills: ResMut<KillCount>,
-    mut _windows: Query<&mut Window>,
+    mut commands: Commands,
+    mut phase: ResMut<GamePhase>,
+    player_q: Query<&Health, With<Player>>,
+    enemy_q: Query<(Entity, &Health), (With<Enemy>, Without<EnemyDying>)>,
+    mut kills: ResMut<KillCount>,
+    mut windows: Query<&mut Window>,
 ) {
+    // Player death
+    if let Ok(hp) = player_q.get_single() {
+        if hp.cur <= 0.0 && *phase == GamePhase::Playing {
+            *phase = GamePhase::Dead;
+            if let Ok(mut win) = windows.get_single_mut() {
+                win.cursor_options.grab_mode = CursorGrabMode::None;
+                win.cursor_options.visible = true;
+            }
+        }
+    }
+    // Enemy deaths
+    for (e, hp) in enemy_q.iter() {
+        if hp.cur <= 0.0 {
+            kills.0 += 1;
+            commands.entity(e).insert(EnemyDying { timer: 0.35 });
+        }
+    }
 }
 
 fn enemy_dying_update(
-    _commands: Commands,
-    _time: Res<Time>,
-    _dying_q: Query<(Entity, &mut Transform, &mut EnemyDying)>,
+    mut commands: Commands,
+    time: Res<Time>,
+    mut dying_q: Query<(Entity, &mut Transform, &mut EnemyDying)>,
 ) {
+    let dt = time.delta_secs();
+    for (e, mut tf, mut dying) in dying_q.iter_mut() {
+        dying.timer -= dt;
+        let s = (dying.timer / 0.35).clamp(0.0, 1.0);
+        tf.scale = Vec3::splat(s);
+        if dying.timer <= 0.0 {
+            commands.entity(e).despawn_recursive();
+        }
+    }
+}
+
+fn damage_flash_update(
+    time: Res<Time>,
+    mut flash_q: Query<(&mut DamageFlash, &mut BackgroundColor)>,
+) {
+    let dt = time.delta_secs();
+    for (mut flash, mut bg) in flash_q.iter_mut() {
+        flash.timer -= dt;
+        let alpha = (flash.timer / FLASH_DURATION).clamp(0.0, 1.0) * 0.45;
+        *bg = BackgroundColor(Color::srgba(0.85, 0.0, 0.0, alpha));
+    }
 }
 
 fn extraction_update(
@@ -1583,12 +1688,6 @@ fn extraction_update(
     _zone_q: Query<&Transform, With<ExtractionZone>>,
     mut _extract: ResMut<ExtractionState>,
     mut _game_phase: ResMut<GamePhase>,
-) {
-}
-
-fn damage_flash_update(
-    _time: Res<Time>,
-    _flash_q: Query<(&mut DamageFlash, &mut BackgroundColor)>,
 ) {
 }
 
