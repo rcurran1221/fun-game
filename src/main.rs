@@ -404,6 +404,7 @@ fn setup(
     spawn_world(&mut commands, &mut meshes, &mut materials);
     spawn_player(&mut commands);
     spawn_enemies(&mut commands, &mut meshes, &mut materials);
+    spawn_loadout_ui(&mut commands);
 }
 
 // ── Spawn world ───────────────────────────────────────────────────────────────
@@ -896,33 +897,369 @@ fn reset_game(
 }
 
 fn loadout_input(
-    _keys: Res<ButtonInput<KeyCode>>,
-    mut _choice: ResMut<LoadoutChoice>,
-    _phase: Res<GamePhase>,
+    keys: Res<ButtonInput<KeyCode>>,
+    mut choice: ResMut<LoadoutChoice>,
+    phase: Res<GamePhase>,
 ) {
+    if *phase != GamePhase::LoadoutSelect {
+        return;
+    }
+    if keys.just_pressed(KeyCode::Digit1) {
+        choice.weapon = WeaponType::Sword;
+        choice.weapon_idx = 0;
+    }
+    if keys.just_pressed(KeyCode::Digit2) {
+        choice.weapon = WeaponType::Bow;
+        choice.weapon_idx = 1;
+    }
+    if keys.just_pressed(KeyCode::Digit3) {
+        choice.weapon = WeaponType::Magic;
+        choice.weapon_idx = 2;
+    }
+    if keys.just_pressed(KeyCode::Digit4) {
+        choice.armor = ArmorType::Steel;
+        choice.armor_idx = 0;
+    }
+    if keys.just_pressed(KeyCode::Digit5) {
+        choice.armor = ArmorType::Dragonhide;
+        choice.armor_idx = 1;
+    }
+    if keys.just_pressed(KeyCode::Digit6) {
+        choice.armor = ArmorType::MageRobes;
+        choice.armor_idx = 2;
+    }
 }
 
 fn update_loadout_ui(
-    _choice: Res<LoadoutChoice>,
-    _weapon_q: Query<(&LoadoutWeaponLabel, &mut TextColor)>,
-    _armor_q: Query<(&LoadoutArmorLabel, &mut TextColor)>,
+    choice: Res<LoadoutChoice>,
+    mut weapon_q: Query<(&LoadoutWeaponLabel, &mut TextColor)>,
+    mut armor_q: Query<(&LoadoutArmorLabel, &mut TextColor)>,
 ) {
+    let sel = Color::srgb(1.0, 0.88, 0.12);
+    let dim = Color::srgba(0.7, 0.7, 0.7, 0.55);
+    for (lbl, mut col) in weapon_q.iter_mut() {
+        *col = TextColor(if lbl.0 == choice.weapon_idx { sel } else { dim });
+    }
+    for (lbl, mut col) in armor_q.iter_mut() {
+        *col = TextColor(if lbl.0 == choice.armor_idx { sel } else { dim });
+    }
 }
 
 fn confirm_loadout(
-    _keys: Res<ButtonInput<KeyCode>>,
-    mut _phase: ResMut<GamePhase>,
-    _choice: Res<LoadoutChoice>,
-    _health_q: Query<&mut Health, With<Player>>,
-    _player_q: Query<&mut Transform, (With<Player>, Without<FpsCameraArm>)>,
-    _look: ResMut<PlayerLook>,
-    _loadout_ui: Query<Entity, With<LoadoutUiRoot>>,
-    _commands: Commands,
-    _windows: Query<&mut Window>,
-    _meshes: ResMut<Assets<Mesh>>,
-    _materials: ResMut<Assets<StandardMaterial>>,
-    _camera_q: Query<Entity, With<Camera3d>>,
+    keys: Res<ButtonInput<KeyCode>>,
+    mut phase: ResMut<GamePhase>,
+    choice: Res<LoadoutChoice>,
+    mut health_q: Query<&mut Health, With<Player>>,
+    mut player_q: Query<&mut Transform, (With<Player>, Without<FpsCameraArm>)>,
+    mut look: ResMut<PlayerLook>,
+    loadout_ui: Query<Entity, With<LoadoutUiRoot>>,
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    camera_q: Query<Entity, With<Camera3d>>,
 ) {
+    if *phase != GamePhase::LoadoutSelect {
+        return;
+    }
+    if !keys.just_pressed(KeyCode::Enter) {
+        return;
+    }
+
+    // Apply armor HP
+    if let Ok(mut hp) = health_q.get_single_mut() {
+        let max = choice.armor.max_hp();
+        *hp = Health::new(max);
+    }
+    // Move player to spawn position, facing south into dungeon
+    if let Ok(mut tf) = player_q.get_single_mut() {
+        tf.translation = Vec3::new(0.0, 0.0, 18.0);
+        tf.rotation = Quat::from_rotation_y(std::f32::consts::PI);
+    }
+    look.yaw = std::f32::consts::PI;
+    look.pitch = 0.0;
+
+    // Despawn loadout UI
+    for e in loadout_ui.iter() {
+        commands.entity(e).despawn_recursive();
+    }
+
+    // Spawn held weapon as child of camera
+    if let Ok(cam) = camera_q.get_single() {
+        spawn_weapon_visual(
+            &mut commands,
+            &mut meshes,
+            &mut materials,
+            choice.weapon,
+            cam,
+        );
+    }
+
+    *phase = GamePhase::Playing;
+}
+
+fn spawn_weapon_visual(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    weapon: WeaponType,
+    cam_entity: Entity,
+) {
+    // Offset: lower-right corner of view
+    let offset = Transform::from_xyz(0.28, -0.22, -0.50);
+
+    match weapon {
+        WeaponType::Sword => {
+            let blade = commands
+                .spawn((
+                    Mesh3d(meshes.add(Cuboid::new(0.06, 0.06, 0.52))),
+                    MeshMaterial3d(materials.add(StandardMaterial {
+                        base_color: Color::srgb(0.75, 0.75, 0.82),
+                        metallic: 0.8,
+                        perceptual_roughness: 0.25,
+                        ..default()
+                    })),
+                    offset,
+                    WeaponVisual,
+                    GameEntity,
+                ))
+                .id();
+            let handle = commands
+                .spawn((
+                    Mesh3d(meshes.add(Cuboid::new(0.07, 0.07, 0.18))),
+                    MeshMaterial3d(materials.add(StandardMaterial {
+                        base_color: Color::srgb(0.42, 0.24, 0.08),
+                        ..default()
+                    })),
+                    Transform::from_xyz(0.0, 0.0, 0.30),
+                ))
+                .id();
+            commands.entity(handle).set_parent(blade);
+            commands.entity(blade).set_parent(cam_entity);
+        }
+        WeaponType::Bow => {
+            let bow = commands
+                .spawn((
+                    Mesh3d(meshes.add(Cuboid::new(0.05, 0.55, 0.05))),
+                    MeshMaterial3d(materials.add(StandardMaterial {
+                        base_color: Color::srgb(0.52, 0.32, 0.10),
+                        perceptual_roughness: 0.88,
+                        ..default()
+                    })),
+                    offset,
+                    WeaponVisual,
+                    GameEntity,
+                ))
+                .id();
+            // Arrow nocked
+            let arrow = commands
+                .spawn((
+                    Mesh3d(meshes.add(Cuboid::new(0.02, 0.02, 0.48))),
+                    MeshMaterial3d(materials.add(StandardMaterial {
+                        base_color: Color::srgb(0.65, 0.55, 0.30),
+                        ..default()
+                    })),
+                    Transform::from_xyz(0.0, 0.0, -0.02),
+                ))
+                .id();
+            commands.entity(arrow).set_parent(bow);
+            commands.entity(bow).set_parent(cam_entity);
+        }
+        WeaponType::Magic => {
+            let staff = commands
+                .spawn((
+                    Mesh3d(meshes.add(Cuboid::new(0.05, 0.05, 0.55))),
+                    MeshMaterial3d(materials.add(StandardMaterial {
+                        base_color: Color::srgb(0.42, 0.24, 0.08),
+                        perceptual_roughness: 0.88,
+                        ..default()
+                    })),
+                    offset,
+                    WeaponVisual,
+                    GameEntity,
+                ))
+                .id();
+            // Glowing orb at tip
+            let orb = commands
+                .spawn((
+                    Mesh3d(meshes.add(Sphere::new(0.07).mesh().ico(2).unwrap())),
+                    MeshMaterial3d(materials.add(StandardMaterial {
+                        base_color: Color::srgb(0.55, 0.10, 0.95),
+                        emissive: LinearRgba::new(0.5, 0.05, 1.5, 1.0),
+                        ..default()
+                    })),
+                    Transform::from_xyz(0.0, 0.0, -0.30),
+                ))
+                .id();
+            commands.entity(orb).set_parent(staff);
+            commands.entity(staff).set_parent(cam_entity);
+        }
+    }
+}
+
+/// Called from setup and reset — spawns the loadout selection screen UI.
+fn spawn_loadout_ui(commands: &mut Commands) {
+    let root = commands
+        .spawn((
+            Node {
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                display: Display::Flex,
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.86)),
+            ZIndex(100),
+            LoadoutUiRoot,
+            GameEntity,
+        ))
+        .id();
+
+    let panel = commands
+        .spawn((
+            Node {
+                width: Val::Px(720.0),
+                display: Display::Flex,
+                flex_direction: FlexDirection::Column,
+                align_items: AlignItems::FlexStart,
+                padding: UiRect::all(Val::Px(30.0)),
+                row_gap: Val::Px(6.0),
+                border: UiRect::all(Val::Px(2.0)),
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.08, 0.06, 0.04, 0.97)),
+            BorderColor(Color::srgb(0.50, 0.40, 0.18)),
+        ))
+        .id();
+    commands.entity(panel).set_parent(root);
+
+    // ── Helper closures ────────────────────────────────────────────────────────
+    let title = |s: &str| -> (Text, TextFont, TextColor) {
+        (
+            Text::new(s.to_string()),
+            TextFont {
+                font_size: 26.0,
+                ..default()
+            },
+            TextColor(Color::srgb(0.92, 0.78, 0.18)),
+        )
+    };
+    let section = |s: &str| -> (Text, TextFont, TextColor) {
+        (
+            Text::new(s.to_string()),
+            TextFont {
+                font_size: 16.0,
+                ..default()
+            },
+            TextColor(Color::srgb(0.75, 0.65, 0.45)),
+        )
+    };
+    let hint = |s: &str| -> (Text, TextFont, TextColor) {
+        (
+            Text::new(s.to_string()),
+            TextFont {
+                font_size: 13.0,
+                ..default()
+            },
+            TextColor(Color::srgba(0.65, 0.65, 0.65, 0.75)),
+        )
+    };
+
+    // Title
+    let t = commands
+        .spawn(title("OSRS FPS  —  SELECT YOUR LOADOUT"))
+        .id();
+    commands.entity(t).set_parent(panel);
+    let sep = commands
+        .spawn(section("─────────────────────────────────────────────"))
+        .id();
+    commands.entity(sep).set_parent(panel);
+
+    // Weapons
+    let wh = commands.spawn(section("  WEAPON  (press 1 / 2 / 3)")).id();
+    commands.entity(wh).set_parent(panel);
+
+    for (i, w) in [WeaponType::Sword, WeaponType::Bow, WeaponType::Magic]
+        .iter()
+        .enumerate()
+    {
+        let label_txt = format!("  [{}] {}", i + 1, w.name());
+        let lbl = commands
+            .spawn((
+                Text::new(label_txt),
+                TextFont {
+                    font_size: 18.0,
+                    ..default()
+                },
+                TextColor(if i == 0 {
+                    Color::srgb(1.0, 0.88, 0.12)
+                } else {
+                    Color::srgba(0.7, 0.7, 0.7, 0.55)
+                }),
+                LoadoutWeaponLabel(i),
+            ))
+            .id();
+        commands.entity(lbl).set_parent(panel);
+
+        let desc = commands.spawn(hint(&format!("       {}", w.desc()))).id();
+        commands.entity(desc).set_parent(panel);
+    }
+
+    let sep2 = commands
+        .spawn(section("─────────────────────────────────────────────"))
+        .id();
+    commands.entity(sep2).set_parent(panel);
+
+    // Armors
+    let ah = commands.spawn(section("  ARMOUR  (press 4 / 5 / 6)")).id();
+    commands.entity(ah).set_parent(panel);
+
+    for (i, a) in [
+        ArmorType::Steel,
+        ArmorType::Dragonhide,
+        ArmorType::MageRobes,
+    ]
+    .iter()
+    .enumerate()
+    {
+        let label_txt = format!("  [{}] {}", i + 4, a.name());
+        let lbl = commands
+            .spawn((
+                Text::new(label_txt),
+                TextFont {
+                    font_size: 18.0,
+                    ..default()
+                },
+                TextColor(if i == 0 {
+                    Color::srgb(1.0, 0.88, 0.12)
+                } else {
+                    Color::srgba(0.7, 0.7, 0.7, 0.55)
+                }),
+                LoadoutArmorLabel(i),
+            ))
+            .id();
+        commands.entity(lbl).set_parent(panel);
+
+        let desc = commands.spawn(hint(&format!("       {}", a.desc()))).id();
+        commands.entity(desc).set_parent(panel);
+    }
+
+    let sep3 = commands
+        .spawn(section("─────────────────────────────────────────────"))
+        .id();
+    commands.entity(sep3).set_parent(panel);
+
+    let enter = commands
+        .spawn((
+            Text::new("  Press ENTER to begin"),
+            TextFont {
+                font_size: 20.0,
+                ..default()
+            },
+            TextColor(Color::srgb(0.55, 0.90, 0.35)),
+        ))
+        .id();
+    commands.entity(enter).set_parent(panel);
 }
 
 fn cursor_management(phase: Res<GamePhase>, mut windows: Query<&mut Window>) {
