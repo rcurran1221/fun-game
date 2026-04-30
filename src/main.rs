@@ -1163,15 +1163,17 @@ fn loadout_input(
 
 fn update_loadout_ui(
     choice: Res<LoadoutChoice>,
-    mut weapon_q: Query<(&LoadoutWeaponLabel, &mut TextColor)>,
-    mut armor_q: Query<(&LoadoutArmorLabel, &mut TextColor)>,
+    mut color_q: ParamSet<(
+        Query<(&LoadoutWeaponLabel, &mut TextColor)>,
+        Query<(&LoadoutArmorLabel, &mut TextColor)>,
+    )>,
 ) {
     let sel = Color::srgb(1.0, 0.88, 0.12);
     let dim = Color::srgba(0.7, 0.7, 0.7, 0.55);
-    for (lbl, mut col) in weapon_q.iter_mut() {
+    for (lbl, mut col) in color_q.p0().iter_mut() {
         *col = TextColor(if lbl.0 == choice.weapon_idx { sel } else { dim });
     }
-    for (lbl, mut col) in armor_q.iter_mut() {
+    for (lbl, mut col) in color_q.p1().iter_mut() {
         *col = TextColor(if lbl.0 == choice.armor_idx { sel } else { dim });
     }
 }
