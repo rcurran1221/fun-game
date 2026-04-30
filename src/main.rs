@@ -405,6 +405,7 @@ fn setup(
     spawn_player(&mut commands);
     spawn_enemies(&mut commands, &mut meshes, &mut materials);
     spawn_loadout_ui(&mut commands);
+    spawn_hud(&mut commands);
 }
 
 // ── Spawn world ───────────────────────────────────────────────────────────────
@@ -882,18 +883,248 @@ fn build_humanoid(
     (left_arm, right_arm, left_leg, right_leg)
 }
 
+fn spawn_hud(commands: &mut Commands) {
+    // Full-screen damage flash overlay (always present)
+    commands.spawn((
+        Node {
+            position_type: PositionType::Absolute,
+            left: Val::Px(0.0),
+            top: Val::Px(0.0),
+            width: Val::Percent(100.0),
+            height: Val::Percent(100.0),
+            ..default()
+        },
+        BackgroundColor(Color::srgba(0.85, 0.0, 0.0, 0.0)),
+        ZIndex(10),
+        DamageFlash { timer: 0.0 },
+        GameEntity,
+    ));
+
+    // Game-over overlay
+    let overlay = commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Px(0.0),
+                top: Val::Px(0.0),
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                display: Display::Flex,
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.75)),
+            ZIndex(50),
+            Visibility::Hidden,
+            HudGameOverlay,
+            GameEntity,
+        ))
+        .id();
+    let go_text = commands
+        .spawn((
+            Text::new(""),
+            TextFont {
+                font_size: 52.0,
+                ..default()
+            },
+            TextColor(Color::WHITE),
+            HudGameOverText,
+            GameEntity,
+        ))
+        .id();
+    commands.entity(go_text).set_parent(overlay);
+
+    // HP text (bottom-left)
+    commands.spawn((
+        Node {
+            position_type: PositionType::Absolute,
+            left: Val::Px(20.0),
+            bottom: Val::Px(44.0),
+            ..default()
+        },
+        Text::new("HP: 100"),
+        TextFont {
+            font_size: 16.0,
+            ..default()
+        },
+        TextColor(Color::WHITE),
+        HudHpText,
+        GameEntity,
+    ));
+
+    // HP bar background
+    let hp_bg = commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Px(20.0),
+                bottom: Val::Px(20.0),
+                width: Val::Px(200.0),
+                height: Val::Px(18.0),
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.1, 0.0, 0.0, 0.8)),
+            GameEntity,
+        ))
+        .id();
+
+    // HP bar fill
+    let hp_fill = commands
+        .spawn((
+            Node {
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                ..default()
+            },
+            BackgroundColor(Color::srgb(0.8, 0.1, 0.1)),
+            HudHpBarFill,
+            GameEntity,
+        ))
+        .id();
+    commands.entity(hp_fill).set_parent(hp_bg);
+
+    // Weapon / armor label (bottom-centre)
+    commands.spawn((
+        Node {
+            position_type: PositionType::Absolute,
+            left: Val::Percent(50.0),
+            bottom: Val::Px(20.0),
+            ..default()
+        },
+        Text::new(""),
+        TextFont {
+            font_size: 16.0,
+            ..default()
+        },
+        TextColor(Color::srgb(0.9, 0.8, 0.5)),
+        HudWeaponText,
+        GameEntity,
+    ));
+
+    // Kill count (top-right)
+    commands.spawn((
+        Node {
+            position_type: PositionType::Absolute,
+            right: Val::Px(20.0),
+            top: Val::Px(20.0),
+            ..default()
+        },
+        Text::new("Kills: 0"),
+        TextFont {
+            font_size: 18.0,
+            ..default()
+        },
+        TextColor(Color::srgb(1.0, 0.9, 0.5)),
+        HudKillText,
+        GameEntity,
+    ));
+
+    // Crosshair (centre)
+    commands.spawn((
+        Node {
+            position_type: PositionType::Absolute,
+            left: Val::Percent(50.0),
+            top: Val::Percent(50.0),
+            margin: UiRect {
+                left: Val::Px(-7.0),
+                top: Val::Px(-10.0),
+                ..default()
+            },
+            ..default()
+        },
+        Text::new("+"),
+        TextFont {
+            font_size: 20.0,
+            ..default()
+        },
+        TextColor(Color::WHITE),
+        GameEntity,
+    ));
+
+    // Extraction progress text
+    commands.spawn((
+        Node {
+            position_type: PositionType::Absolute,
+            left: Val::Percent(50.0),
+            bottom: Val::Px(50.0),
+            ..default()
+        },
+        Text::new(""),
+        TextFont {
+            font_size: 18.0,
+            ..default()
+        },
+        TextColor(Color::srgb(0.3, 1.0, 0.4)),
+        HudExtractText,
+        GameEntity,
+    ));
+
+    // Extraction bar background
+    let ext_bg = commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Percent(35.0),
+                bottom: Val::Px(75.0),
+                width: Val::Px(300.0),
+                height: Val::Px(14.0),
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.7)),
+            GameEntity,
+        ))
+        .id();
+
+    // Extraction bar fill
+    let ext_fill = commands
+        .spawn((
+            Node {
+                width: Val::Percent(0.0),
+                height: Val::Percent(100.0),
+                ..default()
+            },
+            BackgroundColor(Color::srgb(0.2, 0.9, 0.3)),
+            HudExtractBarFill,
+            GameEntity,
+        ))
+        .id();
+    commands.entity(ext_fill).set_parent(ext_bg);
+}
+
 fn reset_game(
-    mut _should: ResMut<ShouldReset>,
-    _commands: Commands,
-    _entities: Query<Entity, With<GameEntity>>,
-    mut _phase: ResMut<GamePhase>,
-    mut _kills: ResMut<KillCount>,
-    mut _extract: ResMut<ExtractionState>,
-    mut _choice: ResMut<LoadoutChoice>,
-    mut _look: ResMut<PlayerLook>,
-    mut _meshes: ResMut<Assets<Mesh>>,
-    mut _materials: ResMut<Assets<StandardMaterial>>,
+    mut should: ResMut<ShouldReset>,
+    mut commands: Commands,
+    entities: Query<Entity, With<GameEntity>>,
+    mut phase: ResMut<GamePhase>,
+    mut kills: ResMut<KillCount>,
+    mut extract: ResMut<ExtractionState>,
+    mut choice: ResMut<LoadoutChoice>,
+    mut look: ResMut<PlayerLook>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
+    if !should.0 {
+        return;
+    }
+    should.0 = false;
+
+    for e in entities.iter() {
+        commands.entity(e).despawn_recursive();
+    }
+
+    *kills = KillCount::default();
+    *extract = ExtractionState::default();
+    *choice = LoadoutChoice::default();
+    *look = PlayerLook::default();
+
+    spawn_world(&mut commands, &mut meshes, &mut materials);
+    spawn_player(&mut commands);
+    spawn_enemies(&mut commands, &mut meshes, &mut materials);
+    spawn_loadout_ui(&mut commands);
+    spawn_hud(&mut commands);
+
+    *phase = GamePhase::LoadoutSelect;
 }
 
 fn loadout_input(
@@ -1682,38 +1913,142 @@ fn damage_flash_update(
 }
 
 fn extraction_update(
-    _time: Res<Time>,
-    _phase: Res<GamePhase>,
-    _player_q: Query<&Transform, With<Player>>,
-    _zone_q: Query<&Transform, With<ExtractionZone>>,
-    mut _extract: ResMut<ExtractionState>,
-    mut _game_phase: ResMut<GamePhase>,
+    time: Res<Time>,
+    mut phase: ResMut<GamePhase>,
+    player_q: Query<&Transform, With<Player>>,
+    zone_q: Query<&Transform, With<ExtractionZone>>,
+    mut extract: ResMut<ExtractionState>,
 ) {
+    if *phase != GamePhase::Playing {
+        return;
+    }
+    let Ok(player_tf) = player_q.get_single() else {
+        return;
+    };
+    let pos = player_tf.translation;
+
+    let mut on_zone = false;
+    for zone_tf in zone_q.iter() {
+        let d = Vec2::new(pos.x - zone_tf.translation.x, pos.z - zone_tf.translation.z).length();
+        if d < EXTRACT_RADIUS {
+            on_zone = true;
+            break;
+        }
+    }
+
+    if on_zone {
+        extract.timer += time.delta_secs();
+        extract.active = true;
+        if extract.timer >= EXTRACT_TIME {
+            *phase = GamePhase::Extracted;
+        }
+    } else {
+        extract.active = false;
+        extract.timer = (extract.timer - time.delta_secs()).max(0.0);
+    }
 }
 
 fn update_hud(
-    _phase: Res<GamePhase>,
-    _choice: Res<LoadoutChoice>,
-    _kills: Res<KillCount>,
-    _extract: Res<ExtractionState>,
-    _player_q: Query<&Health, With<Player>>,
-    _texts: ParamSet<(
+    phase: Res<GamePhase>,
+    choice: Res<LoadoutChoice>,
+    kills: Res<KillCount>,
+    extract: Res<ExtractionState>,
+    player_q: Query<&Health, With<Player>>,
+    mut texts: ParamSet<(
         Query<&mut Text, With<HudHpText>>,
         Query<&mut Text, With<HudWeaponText>>,
         Query<&mut Text, With<HudKillText>>,
         Query<&mut Text, With<HudExtractText>>,
         Query<&mut Text, With<HudGameOverText>>,
     )>,
-    _hp_bar_q: Query<&mut Node, (With<HudHpBarFill>, Without<HudExtractBarFill>)>,
-    _extract_bar_q: Query<&mut Node, With<HudExtractBarFill>>,
-    _overlay_q: Query<&mut Visibility, With<HudGameOverlay>>,
+    mut hp_bar_q: Query<&mut Node, (With<HudHpBarFill>, Without<HudExtractBarFill>)>,
+    mut extract_bar_q: Query<&mut Node, With<HudExtractBarFill>>,
+    mut overlay_q: Query<&mut Visibility, With<HudGameOverlay>>,
 ) {
+    let (hp_cur, hp_frac) = player_q
+        .get_single()
+        .map(|h| (h.cur.max(0.0), h.frac()))
+        .unwrap_or((0.0, 0.0));
+
+    // HP text
+    {
+        let mut q = texts.p0();
+        if let Ok(mut t) = q.get_single_mut() {
+            t.0 = format!("HP: {:.0}", hp_cur);
+        }
+    }
+    // HP bar width
+    if let Ok(mut node) = hp_bar_q.get_single_mut() {
+        node.width = Val::Percent(hp_frac * 100.0);
+    }
+
+    // Weapon / armor label
+    {
+        let mut q = texts.p1();
+        if let Ok(mut t) = q.get_single_mut() {
+            t.0 = format!("{} / {}", choice.weapon.name(), choice.armor.name());
+        }
+    }
+
+    // Kill count
+    {
+        let mut q = texts.p2();
+        if let Ok(mut t) = q.get_single_mut() {
+            t.0 = format!("Kills: {}", kills.0);
+        }
+    }
+
+    // Extraction text + bar
+    {
+        let mut q = texts.p3();
+        if let Ok(mut t) = q.get_single_mut() {
+            t.0 = if extract.active {
+                format!(
+                    "EXTRACTING... {:.1}s",
+                    (EXTRACT_TIME - extract.timer).max(0.0)
+                )
+            } else {
+                String::new()
+            };
+        }
+    }
+    if let Ok(mut node) = extract_bar_q.get_single_mut() {
+        node.width = Val::Percent((extract.timer / EXTRACT_TIME).clamp(0.0, 1.0) * 100.0);
+    }
+
+    // Game-over overlay
+    let show = matches!(*phase, GamePhase::Dead | GamePhase::Extracted);
+    for mut vis in overlay_q.iter_mut() {
+        *vis = if show {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
+    }
+    {
+        let mut q = texts.p4();
+        if let Ok(mut t) = q.get_single_mut() {
+            t.0 = match *phase {
+                GamePhase::Dead => "YOU DIED\n\nPress R to try again".into(),
+                GamePhase::Extracted => "EXTRACTION SUCCESSFUL!\n\nPress R to play again".into(),
+                _ => String::new(),
+            };
+        }
+    }
 }
 
 fn handle_keys(
-    _keys: Res<ButtonInput<KeyCode>>,
-    _phase: Res<GamePhase>,
-    mut _should_reset: ResMut<ShouldReset>,
-    mut _exit: EventWriter<AppExit>,
+    keys: Res<ButtonInput<KeyCode>>,
+    phase: Res<GamePhase>,
+    mut should_reset: ResMut<ShouldReset>,
+    mut exit: EventWriter<AppExit>,
 ) {
+    if keys.just_pressed(KeyCode::Escape) {
+        exit.send(AppExit::Success);
+    }
+    if keys.just_pressed(KeyCode::KeyR) {
+        if matches!(*phase, GamePhase::Dead | GamePhase::Extracted) {
+            should_reset.0 = true;
+        }
+    }
 }
